@@ -196,12 +196,20 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, ErrorResponse{Error: msg})
 }
 
+// parseAnalyticsConfig converts a validated AnalyticsRequest to domain config.
+// Panics if parsing fails, since validation must have passed before calling this.
 func parseAnalyticsConfig(a *AnalyticsRequest) domain.AnalyticsConfig {
 	if a == nil {
 		return domain.AnalyticsConfig{}
 	}
-	window, _ := parseWindow(a.Window)
-	retention, _ := parseRetention(a.Retention)
+	window, err := parseWindow(a.Window)
+	if err != nil {
+		panic("parseAnalyticsConfig: invalid window after validation: " + err.Error())
+	}
+	retention, err := parseRetention(a.Retention)
+	if err != nil {
+		panic("parseAnalyticsConfig: invalid retention after validation: " + err.Error())
+	}
 	return domain.AnalyticsConfig{
 		Enabled:   true,
 		Type:      domain.AnalyticsType(a.Type),
