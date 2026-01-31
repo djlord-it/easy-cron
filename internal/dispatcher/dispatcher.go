@@ -30,6 +30,10 @@ type WebhookSender interface {
 	Send(ctx context.Context, req WebhookRequest) WebhookResult
 }
 
+type AnalyticsSink interface {
+	Write(ctx context.Context, event domain.TriggerEvent, config domain.AnalyticsConfig) error
+}
+
 type WebhookRequest struct {
 	URL       string
 	Secret    string
@@ -66,9 +70,10 @@ func (r WebhookResult) IsRetryable() bool {
 }
 
 type Dispatcher struct {
-	store   Store
-	sender  WebhookSender
-	backoff []time.Duration
+	store     Store
+	sender    WebhookSender
+	analytics AnalyticsSink // optional, nil = disabled
+	backoff   []time.Duration
 }
 
 func New(store Store, sender WebhookSender) *Dispatcher {
@@ -77,6 +82,11 @@ func New(store Store, sender WebhookSender) *Dispatcher {
 		sender:  sender,
 		backoff: defaultBackoff,
 	}
+}
+
+func (d *Dispatcher) WithAnalytics(sink AnalyticsSink) *Dispatcher {
+	d.analytics = sink
+	return d
 }
 
 func (d *Dispatcher) Run(ctx context.Context, ch <-chan domain.TriggerEvent) {
@@ -168,6 +178,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 
 		if result.IsSuccess() {
 			log.Printf("dispatcher: job=%s delivered attempt=%d", event.JobID, attempt)
+			d.writeAnalytics(ctx, event, job)
 			return d.store.UpdateExecutionStatus(ctx, event.ExecutionID, domain.ExecutionStatusDelivered)
 		}
 
@@ -181,4 +192,13 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 
 	log.Printf("dispatcher: job=%s failed status=%d err=%v", event.JobID, lastResult.StatusCode, lastResult.Error)
 	return d.store.UpdateExecutionStatus(ctx, event.ExecutionID, domain.ExecutionStatusFailed)
+}
+
+func (d *Dispatcher) writeAnalytics(ctx context.Context, event domain.TriggerEvent, job domain.Job) {
+	if d.analytics == nil || !job.Analytics.Enabled {
+		return
+	}
+	if err := d.analytics.Write(ctx, event, job.Analytics); err != nil {
+		log.Printf("dispatcher: analytics write failed: %v", err)
+	}
 }
