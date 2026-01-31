@@ -21,12 +21,15 @@ func validateCreateJob(req CreateJobRequest) error {
 		return fmt.Errorf("invalid cron_expression: %w", err)
 	}
 
-	tz := req.Timezone
-	if tz == "" {
-		tz = "UTC"
+	if req.Timezone == "" {
+		return fmt.Errorf("timezone is required")
 	}
-	if err := validateTimezone(tz); err != nil {
+	if err := validateTimezone(req.Timezone); err != nil {
 		return fmt.Errorf("invalid timezone: %w", err)
+	}
+
+	if req.WebhookTimeout != 0 && (req.WebhookTimeout < 1 || req.WebhookTimeout > 60) {
+		return fmt.Errorf("webhook_timeout_seconds must be between 1 and 60")
 	}
 
 	if req.WebhookURL == "" {

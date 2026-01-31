@@ -55,8 +55,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) createJob(w http.ResponseWriter, r *http.Request) {
@@ -71,14 +70,9 @@ func (h *Handler) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tz := req.Timezone
-	if tz == "" {
-		tz = "UTC"
-	}
-
-	timeout := time.Duration(req.WebhookTimeout) * time.Second
-	if timeout == 0 {
-		timeout = 30 * time.Second
+	timeout := 30 * time.Second
+	if req.WebhookTimeout > 0 {
+		timeout = time.Duration(req.WebhookTimeout) * time.Second
 	}
 
 	now := time.Now().UTC()
@@ -104,7 +98,7 @@ func (h *Handler) createJob(w http.ResponseWriter, r *http.Request) {
 	schedule := domain.Schedule{
 		ID:             scheduleID,
 		CronExpression: req.CronExpression,
-		Timezone:       tz,
+		Timezone:       req.Timezone,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
