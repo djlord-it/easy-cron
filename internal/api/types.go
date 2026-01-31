@@ -9,6 +9,14 @@ type CreateJobRequest struct {
 	WebhookURL     string `json:"webhook_url"`
 	WebhookSecret  string `json:"webhook_secret,omitempty"`
 	WebhookTimeout int    `json:"webhook_timeout_seconds,omitempty"` // default 30
+
+	Analytics *AnalyticsRequest `json:"analytics,omitempty"`
+}
+
+type AnalyticsRequest struct {
+	Type      string `json:"type"`      // "count", "rate"
+	Window    string `json:"window"`    // "1m", "5m", "1h"
+	Retention string `json:"retention"` // "1h", "24h", "7d"
 }
 
 type JobResponse struct {

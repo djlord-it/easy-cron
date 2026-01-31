@@ -91,6 +91,7 @@ func (h *Handler) createJob(w http.ResponseWriter, r *http.Request) {
 			Secret:     req.WebhookSecret,
 			Timeout:    timeout,
 		},
+		Analytics: parseAnalyticsConfig(req.Analytics),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -193,4 +194,18 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, ErrorResponse{Error: msg})
+}
+
+func parseAnalyticsConfig(a *AnalyticsRequest) domain.AnalyticsConfig {
+	if a == nil {
+		return domain.AnalyticsConfig{}
+	}
+	window, _ := parseWindow(a.Window)
+	retention, _ := parseRetention(a.Retention)
+	return domain.AnalyticsConfig{
+		Enabled:   true,
+		Type:      domain.AnalyticsType(a.Type),
+		Window:    window,
+		Retention: retention,
+	}
 }
