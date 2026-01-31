@@ -8,6 +8,9 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+// Maximum retention: 7 days (604800 seconds)
+const maxRetentionSeconds = 7 * 24 * 60 * 60
+
 func validateCreateJob(req CreateJobRequest) error {
 	if req.Name == "" {
 		return fmt.Errorf("name is required")
@@ -49,53 +52,13 @@ func validateCreateJob(req CreateJobRequest) error {
 }
 
 func validateAnalytics(a *AnalyticsRequest) error {
-	switch a.Type {
-	case "count", "rate":
-	default:
-		return fmt.Errorf("type must be 'count' or 'rate'")
+	if a.RetentionSeconds < 0 {
+		return fmt.Errorf("retention_seconds must be non-negative")
 	}
-
-	window, err := parseWindow(a.Window)
-	if err != nil {
-		return fmt.Errorf("invalid window: %w", err)
+	if a.RetentionSeconds > maxRetentionSeconds {
+		return fmt.Errorf("retention_seconds must not exceed %d (7 days)", maxRetentionSeconds)
 	}
-
-	retention, err := parseRetention(a.Retention)
-	if err != nil {
-		return fmt.Errorf("invalid retention: %w", err)
-	}
-
-	if retention < window {
-		return fmt.Errorf("retention must be >= window")
-	}
-
 	return nil
-}
-
-func parseWindow(s string) (time.Duration, error) {
-	switch s {
-	case "1m":
-		return time.Minute, nil
-	case "5m":
-		return 5 * time.Minute, nil
-	case "1h":
-		return time.Hour, nil
-	default:
-		return 0, fmt.Errorf("must be '1m', '5m', or '1h'")
-	}
-}
-
-func parseRetention(s string) (time.Duration, error) {
-	switch s {
-	case "1h":
-		return time.Hour, nil
-	case "24h":
-		return 24 * time.Hour, nil
-	case "7d":
-		return 7 * 24 * time.Hour, nil
-	default:
-		return 0, fmt.Errorf("must be '1h', '24h', or '7d'")
-	}
 }
 
 func validateCron(expr string) error {

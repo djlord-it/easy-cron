@@ -20,10 +20,30 @@ The scheduler evaluates enabled jobs each tick, computes the next fire time usin
 
 ## Configuration
 
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | Yes | - | PostgreSQL connection string |
+| `REDIS_ADDR` | No | - | Redis address for analytics (optional) |
+| `HTTP_ADDR` | No | `:8080` | API listen address |
+| `TICK_INTERVAL` | No | `30s` | Scheduler tick interval |
+
+### Tick Interval and Cron Resolution
+
+Cron expressions use **minute-level resolution** (standard 5-field syntax). The `TICK_INTERVAL` controls how frequently the scheduler checks for due jobs:
+
+- Tick intervals < 1 minute are allowed but do not increase cron precision
+- A job scheduled for `*/5 * * * *` fires every 5 minutes regardless of tick interval
+- Shorter tick intervals reduce latency between scheduled time and actual firing
+- Default 30s provides good balance between responsiveness and overhead
+
+### Job Configuration
+
 Jobs are configured via the API with:
 
 - `name`: Job identifier
-- `cron_expression`: Standard 5-field cron syntax
+- `cron_expression`: Standard 5-field cron syntax (minute hour day month weekday)
 - `timezone`: IANA timezone
 - `webhook_url`: Delivery endpoint
 - `webhook_secret`: Optional HMAC secret

@@ -13,10 +13,10 @@ type CreateJobRequest struct {
 	Analytics *AnalyticsRequest `json:"analytics,omitempty"`
 }
 
+// AnalyticsRequest enables per-job analytics.
+// Presence of this object enables analytics; omit to disable.
 type AnalyticsRequest struct {
-	Type      string `json:"type"`      // "count", "rate"
-	Window    string `json:"window"`    // "1m", "5m", "1h"
-	Retention string `json:"retention"` // "1h", "24h", "7d"
+	RetentionSeconds int `json:"retention_seconds,omitempty"` // default 86400 (24h)
 }
 
 type JobResponse struct {

@@ -2,7 +2,7 @@ package analytics
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -10,49 +10,48 @@ import (
 	"github.com/djlord-it/easy-cron/internal/domain"
 )
 
+// RedisSink writes execution counts to Redis.
+// Best-effort: errors are logged internally and never propagated.
 type RedisSink struct {
 	client *redis.Client
 }
 
+// NewRedisSink creates a new Redis analytics sink.
 func NewRedisSink(client *redis.Client) *RedisSink {
 	return &RedisSink{client: client}
 }
 
-func (s *RedisSink) Write(ctx context.Context, event domain.TriggerEvent, config domain.AnalyticsConfig) error {
+// Record increments the execution count for the given event's minute bucket.
+// Returns immediately if analytics is not enabled.
+// Errors are logged but never returned; analytics must not affect dispatch correctness.
+func (s *RedisSink) Record(ctx context.Context, event domain.TriggerEvent, config domain.AnalyticsConfig) {
 	if !config.Enabled {
-		return nil
+		return
 	}
 
-	key := buildKey(event.ProjectID.String(), event.JobID.String(), config.Type, event.ScheduledAt, config.Window)
+	key := buildKey(event.ProjectID.String(), event.JobID.String(), event.ScheduledAt)
+	ttl := resolveTTL(config.RetentionSeconds)
 
 	pipe := s.client.Pipeline()
 	pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, config.Retention)
+	pipe.Expire(ctx, key, ttl)
 
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("redis pipeline: %w", err)
+	if _, err := pipe.Exec(ctx); err != nil {
+		log.Printf("analytics: redis error: %v", err)
 	}
-
-	return nil
 }
 
-func buildKey(projectID, jobID string, typ domain.AnalyticsType, t time.Time, window time.Duration) string {
-	bucket := truncateToBucket(t, window)
-	return fmt.Sprintf("p:%s:j:%s:%s:%s", projectID, jobID, typ, bucket)
+// buildKey constructs the Redis key for a given execution.
+// Format: p:{projectID}:j:{jobID}:exec:{YYYYMMDDHHMM}
+func buildKey(projectID, jobID string, scheduledAt time.Time) string {
+	bucket := scheduledAt.UTC().Format("200601021504")
+	return "p:" + projectID + ":j:" + jobID + ":exec:" + bucket
 }
 
-func truncateToBucket(t time.Time, window time.Duration) string {
-	t = t.UTC()
-	switch window {
-	case time.Minute:
-		return t.Format("200601021504")
-	case 5 * time.Minute:
-		minute := (t.Minute() / 5) * 5
-		return t.Format("2006010215") + fmt.Sprintf("%02d", minute)
-	case time.Hour:
-		return t.Format("2006010215")
-	default:
-		return t.Format("200601021504")
+// resolveTTL returns the TTL duration, using the default if retentionSeconds is zero or negative.
+func resolveTTL(retentionSeconds int) time.Duration {
+	if retentionSeconds <= 0 {
+		return time.Duration(domain.DefaultRetentionSeconds) * time.Second
 	}
+	return time.Duration(retentionSeconds) * time.Second
 }

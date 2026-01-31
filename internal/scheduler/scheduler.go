@@ -2,8 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -91,7 +89,7 @@ func (s *Scheduler) processTick(ctx context.Context) error {
 
 	for _, jws := range jobs {
 		if err := s.processJob(ctx, jws, s.lastTick, now); err != nil {
-			log.Printf("scheduler: job %s error: %v", jws.Job.ID, err)
+			log.Printf("scheduler: job=%s project=%s error: %v", jws.Job.ID, jws.Job.ProjectID, err)
 		}
 	}
 
@@ -128,18 +126,8 @@ func (s *Scheduler) processJob(ctx context.Context, jws JobWithSchedule, lastTic
 	for i := 0; i < maxIterations && !t.After(nowInTZ); i++ {
 		scheduledAtUTC := t.UTC().Truncate(time.Minute)
 
-		// Check bounds
-		if schedule.StartAt != nil && scheduledAtUTC.Before(*schedule.StartAt) {
-			t = cronSched.Next(t)
-			continue
-		}
-		if schedule.EndAt != nil && scheduledAtUTC.After(*schedule.EndAt) {
-			t = cronSched.Next(t)
-			continue
-		}
-
 		if err := s.emitExecution(ctx, job, scheduledAtUTC, now); err != nil {
-			log.Printf("scheduler: job %s at %s error: %v", job.ID, scheduledAtUTC.Format(time.RFC3339), err)
+			log.Printf("scheduler: job=%s project=%s at %s error: %v", job.ID, job.ProjectID, scheduledAtUTC.Format(time.RFC3339), err)
 		}
 
 		t = cronSched.Next(t)
@@ -149,7 +137,6 @@ func (s *Scheduler) processJob(ctx context.Context, jws JobWithSchedule, lastTic
 }
 
 func (s *Scheduler) emitExecution(ctx context.Context, job domain.Job, scheduledAt, now time.Time) error {
-	idempotencyKey := generateIdempotencyKey(job.ID, scheduledAt)
 	executionID := uuid.New()
 
 	execution := domain.Execution{
@@ -170,25 +157,18 @@ func (s *Scheduler) emitExecution(ctx context.Context, job domain.Job, scheduled
 	}
 
 	event := domain.TriggerEvent{
-		ExecutionID:    executionID,
-		JobID:          job.ID,
-		ProjectID:      job.ProjectID,
-		ScheduledAt:    scheduledAt,
-		FiredAt:        now,
-		IdempotencyKey: idempotencyKey,
-		CreatedAt:      now,
+		ExecutionID: executionID,
+		JobID:       job.ID,
+		ProjectID:   job.ProjectID,
+		ScheduledAt: scheduledAt,
+		FiredAt:     now,
+		CreatedAt:   now,
 	}
 
 	if err := s.emitter.Emit(ctx, event); err != nil {
 		return fmt.Errorf("emit: %w", err)
 	}
 
-	log.Printf("scheduler: emitted job=%s scheduled_at=%s", job.ID, scheduledAt.Format(time.RFC3339))
+	log.Printf("scheduler: emitted job=%s project=%s scheduled_at=%s", job.ID, job.ProjectID, scheduledAt.Format(time.RFC3339))
 	return nil
-}
-
-func generateIdempotencyKey(jobID uuid.UUID, scheduledAt time.Time) string {
-	data := fmt.Sprintf("%s:%d", jobID.String(), scheduledAt.Unix())
-	hash := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(hash[:])
 }

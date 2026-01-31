@@ -1,17 +1,11 @@
 package domain
 
-import "time"
-
-type AnalyticsType string
-
-const (
-	AnalyticsTypeCount AnalyticsType = "count"
-	AnalyticsTypeRate  AnalyticsType = "rate"
-)
-
+// AnalyticsConfig defines per-job analytics settings.
+// Analytics is strictly opt-in: if Enabled is false, no Redis writes occur.
 type AnalyticsConfig struct {
-	Enabled   bool
-	Type      AnalyticsType
-	Window    time.Duration // 1m, 5m, 1h
-	Retention time.Duration // TTL, must be >= Window
+	Enabled          bool
+	RetentionSeconds int // TTL for analytics keys; uses DefaultRetentionSeconds if zero
 }
+
+// DefaultRetentionSeconds is 24 hours (86400 seconds).
+const DefaultRetentionSeconds = 86400

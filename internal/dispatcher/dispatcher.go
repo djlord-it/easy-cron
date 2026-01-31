@@ -2,6 +2,7 @@ package dispatcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -20,9 +21,16 @@ var defaultBackoff = []time.Duration{
 
 const maxAttempts = 4
 
+// ErrStatusTransitionDenied is returned when a status update would regress
+// from a terminal state (delivered/failed).
+var ErrStatusTransitionDenied = errors.New("status transition denied: execution already in terminal state")
+
 type Store interface {
 	GetJobByID(ctx context.Context, jobID uuid.UUID) (domain.Job, error)
 	InsertDeliveryAttempt(ctx context.Context, attempt domain.DeliveryAttempt) error
+	// UpdateExecutionStatus sets the execution status. Implementations MUST
+	// reject transitions from terminal states (delivered/failed) and return
+	// ErrStatusTransitionDenied. This ensures idempotency on replay.
 	UpdateExecutionStatus(ctx context.Context, executionID uuid.UUID, status domain.ExecutionStatus) error
 }
 
@@ -31,7 +39,7 @@ type WebhookSender interface {
 }
 
 type AnalyticsSink interface {
-	Write(ctx context.Context, event domain.TriggerEvent, config domain.AnalyticsConfig) error
+	Record(ctx context.Context, event domain.TriggerEvent, config domain.AnalyticsConfig)
 }
 
 type WebhookRequest struct {
@@ -89,15 +97,55 @@ func (d *Dispatcher) WithAnalytics(sink AnalyticsSink) *Dispatcher {
 	return d
 }
 
+// Run processes events from the channel until context is cancelled.
+// After cancellation, it drains remaining buffered events with a timeout.
 func (d *Dispatcher) Run(ctx context.Context, ch <-chan domain.TriggerEvent) {
 	for {
 		select {
 		case <-ctx.Done():
+			d.drain(ch)
 			return
 		case event := <-ch:
 			if err := d.Dispatch(ctx, event); err != nil {
 				log.Printf("dispatcher: error: %v", err)
 			}
+		}
+	}
+}
+
+// DrainTimeout is the maximum time to wait for buffered events during shutdown.
+const DrainTimeout = 30 * time.Second
+
+// drain processes remaining events in the channel buffer after shutdown signal.
+// Uses a background context since the main context is already cancelled.
+func (d *Dispatcher) drain(ch <-chan domain.TriggerEvent) {
+	drainCtx, cancel := context.WithTimeout(context.Background(), DrainTimeout)
+	defer cancel()
+
+	count := 0
+	for {
+		select {
+		case <-drainCtx.Done():
+			if count > 0 {
+				log.Printf("dispatcher: drain timeout, processed %d events", count)
+			}
+			return
+		case event, ok := <-ch:
+			if !ok {
+				// Channel closed
+				log.Printf("dispatcher: drain complete, processed %d events", count)
+				return
+			}
+			if err := d.Dispatch(drainCtx, event); err != nil {
+				log.Printf("dispatcher: drain error: %v", err)
+			}
+			count++
+		default:
+			// No more buffered events
+			if count > 0 {
+				log.Printf("dispatcher: drain complete, processed %d events", count)
+			}
+			return
 		}
 	}
 }
@@ -108,7 +156,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 		return fmt.Errorf("get job: %w", err)
 	}
 
+	// Write analytics immediately on every TriggerEvent, independent of delivery outcome.
+	// This counts executions, not successful deliveries.
+	d.writeAnalytics(ctx, event, job)
+
 	if job.Delivery.WebhookURL == "" {
+		log.Printf("dispatcher: job=%s has no webhook URL configured", event.JobID)
 		return fmt.Errorf("job %s: no webhook URL", event.JobID)
 	}
 
@@ -178,8 +231,15 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 
 		if result.IsSuccess() {
 			log.Printf("dispatcher: job=%s delivered attempt=%d", event.JobID, attempt)
-			d.writeAnalytics(ctx, event, job)
-			return d.store.UpdateExecutionStatus(ctx, event.ExecutionID, domain.ExecutionStatusDelivered)
+			if err := d.store.UpdateExecutionStatus(ctx, event.ExecutionID, domain.ExecutionStatusDelivered); err != nil {
+				if errors.Is(err, ErrStatusTransitionDenied) {
+					// Execution already in terminal state (likely reprocessing). Safe to ignore.
+					log.Printf("dispatcher: job=%s execution=%s already terminal, skipping status update", event.JobID, event.ExecutionID)
+					return nil
+				}
+				return err
+			}
+			return nil
 		}
 
 		if !result.IsRetryable() {
@@ -191,14 +251,28 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 	}
 
 	log.Printf("dispatcher: job=%s failed status=%d err=%v", event.JobID, lastResult.StatusCode, lastResult.Error)
-	return d.store.UpdateExecutionStatus(ctx, event.ExecutionID, domain.ExecutionStatusFailed)
+	if err := d.store.UpdateExecutionStatus(ctx, event.ExecutionID, domain.ExecutionStatusFailed); err != nil {
+		if errors.Is(err, ErrStatusTransitionDenied) {
+			// Execution already in terminal state (likely reprocessing). Safe to ignore.
+			log.Printf("dispatcher: job=%s execution=%s already terminal, skipping status update", event.JobID, event.ExecutionID)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
+// writeAnalytics records execution metrics as a best-effort side-effect.
+// The sink handles errors internally; analytics never affects dispatch correctness.
 func (d *Dispatcher) writeAnalytics(ctx context.Context, event domain.TriggerEvent, job domain.Job) {
-	if d.analytics == nil || !job.Analytics.Enabled {
+	if d.analytics == nil {
+		if job.Analytics.Enabled {
+			log.Printf("dispatcher: job=%s analytics enabled but no sink configured (metrics not recorded)", event.JobID)
+		}
 		return
 	}
-	if err := d.analytics.Write(ctx, event, job.Analytics); err != nil {
-		log.Printf("dispatcher: analytics write failed: %v", err)
+	if !job.Analytics.Enabled {
+		return
 	}
+	d.analytics.Record(ctx, event, job.Analytics)
 }

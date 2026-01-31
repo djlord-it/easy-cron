@@ -58,9 +58,20 @@ func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// maxRequestBodySize is the maximum allowed request body size (1MB).
+const maxRequestBodySize = 1 << 20
+
 func (h *Handler) createJob(w http.ResponseWriter, r *http.Request) {
+	// Limit request body size to prevent DoS via large payloads
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+
 	var req CreateJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Check if error is due to body size limit
+		if err.Error() == "http: request body too large" {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -189,7 +200,9 @@ func (h *Handler) listExecutions(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("api: json encode error: %v", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
@@ -197,23 +210,13 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // parseAnalyticsConfig converts a validated AnalyticsRequest to domain config.
-// Panics if parsing fails, since validation must have passed before calling this.
+// If analytics is nil, returns a disabled config.
 func parseAnalyticsConfig(a *AnalyticsRequest) domain.AnalyticsConfig {
 	if a == nil {
 		return domain.AnalyticsConfig{}
 	}
-	window, err := parseWindow(a.Window)
-	if err != nil {
-		panic("parseAnalyticsConfig: invalid window after validation: " + err.Error())
-	}
-	retention, err := parseRetention(a.Retention)
-	if err != nil {
-		panic("parseAnalyticsConfig: invalid retention after validation: " + err.Error())
-	}
 	return domain.AnalyticsConfig{
-		Enabled:   true,
-		Type:      domain.AnalyticsType(a.Type),
-		Window:    window,
-		Retention: retention,
+		Enabled:          true,
+		RetentionSeconds: a.RetentionSeconds,
 	}
 }

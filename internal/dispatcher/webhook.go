@@ -16,9 +16,26 @@ type HTTPWebhookSender struct {
 	client *http.Client
 }
 
+// NewHTTPWebhookSender creates a webhook sender with a properly configured HTTP client.
+// The client is configured with:
+// - Connection pooling (max 100 idle connections, 10 per host)
+// - Idle connection timeout (90s)
+// - TLS handshake timeout (10s)
+// - Response header timeout (30s) - prevents slow loris attacks
 func NewHTTPWebhookSender() *HTTPWebhookSender {
+	transport := &http.Transport{
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 	return &HTTPWebhookSender{
-		client: &http.Client{},
+		client: &http.Client{
+			Transport: transport,
+			// No client-level timeout; we use per-request context timeouts
+		},
 	}
 }
 

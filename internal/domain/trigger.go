@@ -12,9 +12,8 @@ type TriggerEvent struct {
 	JobID       uuid.UUID
 	ProjectID   uuid.UUID
 
-	ScheduledAt    time.Time // intended fire time (UTC)
-	FiredAt        time.Time // actual emission time
-	IdempotencyKey string
+	ScheduledAt time.Time // intended fire time (UTC)
+	FiredAt     time.Time // actual emission time
 
 	CreatedAt time.Time
 }
