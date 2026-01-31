@@ -79,6 +79,19 @@ func New(store Store, sender WebhookSender) *Dispatcher {
 	}
 }
 
+func (d *Dispatcher) Run(ctx context.Context, ch <-chan domain.TriggerEvent) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-ch:
+			if err := d.Dispatch(ctx, event); err != nil {
+				log.Printf("dispatcher: error: %v", err)
+			}
+		}
+	}
+}
+
 func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) error {
 	job, err := d.store.GetJobByID(ctx, event.JobID)
 	if err != nil {
