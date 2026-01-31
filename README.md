@@ -2,7 +2,6 @@
 
 [![Go](https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![CI](https://github.com/djlord-it/easy-cron/actions/workflows/ci.yml/badge.svg)](https://github.com/djlord-it/easy-cron/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/djlord-it/easy-cron)](https://goreportcard.com/report/github.com/djlord-it/easy-cron)
 
 A cron job scheduler with webhook delivery.
 
