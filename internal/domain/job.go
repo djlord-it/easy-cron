@@ -15,6 +15,7 @@ type Job struct {
 
 	ScheduleID uuid.UUID
 	Delivery   DeliveryConfig
+	Analytics  AnalyticsConfig
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
