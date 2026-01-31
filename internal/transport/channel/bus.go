@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"easycron/internal/domain"
+	"github.com/djlord-it/easy-cron/internal/domain"
 )
 
 // ErrBufferFull is returned when the event buffer is full and emit times out.

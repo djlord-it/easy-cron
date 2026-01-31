@@ -1,4 +1,4 @@
-module easycron
+module github.com/djlord-it/easy-cron
 
 go 1.24.4
 

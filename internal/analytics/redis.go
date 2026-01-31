@@ -7,7 +7,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"easycron/internal/domain"
+	"github.com/djlord-it/easy-cron/internal/domain"
 )
 
 type RedisSink struct {

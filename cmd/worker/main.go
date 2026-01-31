@@ -10,10 +10,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"easycron/internal/dispatcher"
-	"easycron/internal/domain"
-	"easycron/internal/scheduler"
-	"easycron/internal/transport/channel"
+	"github.com/djlord-it/easy-cron/internal/dispatcher"
+	"github.com/djlord-it/easy-cron/internal/domain"
+	"github.com/djlord-it/easy-cron/internal/scheduler"
+	"github.com/djlord-it/easy-cron/internal/transport/channel"
 )
 
 func main() {

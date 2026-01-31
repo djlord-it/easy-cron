@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"easycron/internal/domain"
+	"github.com/djlord-it/easy-cron/internal/domain"
 )
 
 var defaultBackoff = []time.Duration{
