@@ -43,8 +43,13 @@ func Load() Config {
 	}
 
 	// Apply defaults
+	// Support Railway's PORT variable as fallback for HTTP_ADDR
 	if cfg.HTTPAddr == "" {
-		cfg.HTTPAddr = ":8080"
+		if port := os.Getenv("PORT"); port != "" {
+			cfg.HTTPAddr = ":" + port
+		} else {
+			cfg.HTTPAddr = ":8080"
+		}
 	}
 	if cfg.TickIntervalStr == "" {
 		cfg.TickIntervalStr = "30s"
