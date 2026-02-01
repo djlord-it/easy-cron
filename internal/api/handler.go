@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -17,6 +18,7 @@ type Store interface {
 	CreateJob(ctx context.Context, job domain.Job, schedule domain.Schedule) error
 	ListJobs(ctx context.Context, projectID uuid.UUID) ([]JobWithSchedule, error)
 	ListExecutions(ctx context.Context, jobID uuid.UUID) ([]domain.Execution, error)
+	DeleteJob(ctx context.Context, jobID, projectID uuid.UUID) error
 }
 
 type JobWithSchedule struct {
@@ -48,6 +50,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case strings.HasSuffix(path, "/executions") && r.Method == http.MethodGet:
 		h.listExecutions(w, r)
+
+	case strings.HasPrefix(path, "/jobs/") && r.Method == http.MethodDelete:
+		h.deleteJob(w, r)
 
 	default:
 		writeError(w, http.StatusNotFound, "not found")
@@ -195,6 +200,34 @@ func (h *Handler) listExecutions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) deleteJob(w http.ResponseWriter, r *http.Request) {
+	// Extract job ID from path: /jobs/{id}
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 || parts[0] != "jobs" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	jobID, err := uuid.Parse(parts[1])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	if err := h.store.DeleteJob(r.Context(), jobID, h.projectID); err != nil {
+		log.Printf("api: delete job error: %v", err)
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "job not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to delete job")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

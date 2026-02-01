@@ -297,6 +297,18 @@ func (s *Store) ListExecutions(ctx context.Context, jobID uuid.UUID) ([]domain.E
 	return result, nil
 }
 
+func (s *Store) DeleteJob(ctx context.Context, jobID, projectID uuid.UUID) error {
+	var deletedID uuid.UUID
+	err := s.db.QueryRowContext(ctx, queryDeleteJob, jobID, projectID).Scan(&deletedID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return sql.ErrNoRows
+		}
+		return err
+	}
+	return nil
+}
+
 // Compile-time interface assertions
 var (
 	_ scheduler.Store  = (*Store)(nil)

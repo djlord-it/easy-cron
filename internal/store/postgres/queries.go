@@ -69,3 +69,14 @@ FROM executions
 WHERE job_id = $1
 ORDER BY scheduled_at DESC
 `
+
+const queryDeleteJob = `
+WITH deleted_attempts AS (
+    DELETE FROM delivery_attempts
+    WHERE execution_id IN (SELECT id FROM executions WHERE job_id = $1)
+),
+deleted_executions AS (
+    DELETE FROM executions WHERE job_id = $1
+)
+DELETE FROM jobs WHERE id = $1 AND project_id = $2
+RETURNING id`
