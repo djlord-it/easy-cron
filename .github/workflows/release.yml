@@ -3,57 +3,61 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: "1.22"
 
-      - name: Build binary
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Get commit hash
+        id: commit
+        run: echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build linux/amd64
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: 0
         run: |
-          go build -ldflags "-X main.version=${{ github.ref_name }}" \
-            -o easycron-${{ matrix.goos }}-${{ matrix.goarch }} \
-            ./cmd/worker
+          go build -ldflags "-X main.version=${{ steps.version.outputs.VERSION }} -X main.commit=${{ steps.commit.outputs.COMMIT }}" \
+            -o easycron-linux-amd64 ./cmd/easycron
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: easycron-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: easycron-${{ matrix.goos }}-${{ matrix.goarch }}
+      - name: Build darwin/amd64
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags "-X main.version=${{ steps.version.outputs.VERSION }} -X main.commit=${{ steps.commit.outputs.COMMIT }}" \
+            -o easycron-darwin-amd64 ./cmd/easycron
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+      - name: Build darwin/arm64
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags "-X main.version=${{ steps.version.outputs.VERSION }} -X main.commit=${{ steps.commit.outputs.COMMIT }}" \
+            -o easycron-darwin-arm64 ./cmd/easycron
 
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Create release
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: artifacts/**/*
-          generate_release_notes: true
+          files: |
+            easycron-linux-amd64
+            easycron-darwin-amd64
+            easycron-darwin-arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

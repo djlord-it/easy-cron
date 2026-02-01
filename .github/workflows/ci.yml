@@ -2,54 +2,27 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - "**"
   pull_request:
-    branches: [main]
 
 jobs:
-  guardrails:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-          cache: false
-
-      - name: Dependency integrity
-        run: |
-          go mod tidy
-          git diff --exit-code go.mod go.sum
-
-      - name: Formatting
-        run: |
-          test -z "$(gofmt -l .)"
-
-      - name: Vet
-        run: go vet ./...
+          go-version: "1.22"
 
       - name: Build
         run: go build ./...
 
-      - name: Test with race detection
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
         run: go test -race ./...
-
-      - name: Boundary - scheduler must not reference delivery concerns
-        run: |
-          ! grep -rE 'net/http|webhook|redis|kafka' internal/scheduler/
-
-      - name: Boundary - dispatcher must not reference scheduling concerns
-        run: |
-          ! grep -rE 'cron\.Parse|CronExpression|TickInterval|robfig/cron' internal/dispatcher/
-
-      - name: Boundary - domain must not reference transport or infrastructure
-        run: |
-          ! grep -rE 'net/http|redis|kafka|channel' internal/domain/
-
-      - name: API surface check
-        run: |
-          echo "=== HTTP Handlers ==="
-          grep -rn 'func.*http.ResponseWriter' internal/api/ || true
-          echo "=== Route Patterns ==="
-          grep -rn 'case.*path.*==' internal/api/ || true

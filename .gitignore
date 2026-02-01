@@ -1,7 +1,7 @@
 # macOS
 .DS_Store
 
-# Go build artifacts 
+# Go build artifacts
 *.exe
 *.exe~
 *.dll
@@ -19,3 +19,4 @@ go.work.sum
 
 *.md
 !README.md
+!OPERATORS.md
