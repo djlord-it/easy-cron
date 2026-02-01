@@ -126,10 +126,19 @@ X-EasyCron-Signature: <hmac-sha256-hex>
 The `X-EasyCron-Signature` header contains an HMAC-SHA256 signature of the request body, computed using the job's `webhook_secret`. To verify:
 
 ```go
-mac := hmac.New(sha256.New, []byte(secret))
-mac.Write(requestBody)
-expected := hex.EncodeToString(mac.Sum(nil))
-// Compare expected with X-EasyCron-Signature header
+import (
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/hex"
+)
+
+func verifySignature(secret string, body []byte, signature string) bool {
+    mac := hmac.New(sha256.New, []byte(secret))
+    mac.Write(body)
+    expected := hex.EncodeToString(mac.Sum(nil))
+    // Use constant-time comparison to prevent timing attacks
+    return hmac.Equal([]byte(expected), []byte(signature))
+}
 ```
 
 #### Retry Behavior
@@ -146,6 +155,8 @@ Non-retryable: 4xx responses (except 429).
 After 4 failed attempts, the execution is marked as `failed`.
 
 ## Integration Modes
+
+EasyCron runs in single-tenant mode with a fixed project ID. Each application should run its own EasyCron instance.
 
 ### Sidecar (Local/Dev)
 

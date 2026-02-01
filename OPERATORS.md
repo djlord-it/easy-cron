@@ -126,6 +126,8 @@ The dispatcher has 30 seconds to process remaining buffered events. Events still
 - Incomplete retry sequences
 - Analytics writes that failed before crash
 
+**WARNING:** The in-memory event buffer (100 events) is NOT persisted. Events in the buffer at crash or restart time are permanently lost.
+
 ### Recommended Practice
 
 For critical jobs, monitor execution status via the API. If an execution remains in `emitted` state beyond expected delivery time, investigate manually.
@@ -176,3 +178,35 @@ The HTTP webhook sender maintains up to 100 idle connections (10 per host). Adju
 ### Tick Interval
 
 Default 30 seconds. Shorter intervals increase database load but reduce latency. Cron resolution remains minute-level regardless of tick interval.
+
+## Deployment
+
+### Systemd Example
+
+Create `/etc/systemd/system/easycron.service`:
+
+```ini
+[Unit]
+Description=EasyCron Scheduler
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=easycron
+Environment=DATABASE_URL=postgres://localhost/easycron
+Environment=HTTP_ADDR=:8080
+ExecStart=/usr/local/bin/easycron serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable and start:
+
+```bash
+systemctl daemon-reload
+systemctl enable easycron
+systemctl start easycron
+```
