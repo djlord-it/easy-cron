@@ -31,6 +31,14 @@ type EventEmitter interface {
 	Emit(ctx context.Context, event domain.TriggerEvent) error
 }
 
+// MetricsSink defines the interface for recording scheduler metrics.
+// All methods must be non-blocking and fire-and-forget.
+type MetricsSink interface {
+	TickStarted()
+	TickCompleted(duration time.Duration, jobsTriggered int, err error)
+	TickDrift(drift time.Duration)
+}
+
 type JobWithSchedule struct {
 	Job      domain.Job
 	Schedule domain.Schedule
@@ -45,6 +53,7 @@ type Scheduler struct {
 	store    Store
 	parser   CronParser
 	emitter  EventEmitter
+	metrics  MetricsSink // optional, nil = disabled
 	clock    func() time.Time
 	lastTick time.Time
 }
@@ -59,19 +68,33 @@ func New(config Config, store Store, parser CronParser, emitter EventEmitter) *S
 	}
 }
 
+// WithMetrics attaches a metrics sink to the scheduler.
+func (s *Scheduler) WithMetrics(sink MetricsSink) *Scheduler {
+	s.metrics = sink
+	return s
+}
+
 func (s *Scheduler) Run(ctx context.Context) error {
 	ticker := time.NewTicker(s.config.TickInterval)
 	defer ticker.Stop()
 
 	log.Printf("scheduler: started, tick=%s", s.config.TickInterval)
 	s.lastTick = s.clock().UTC()
+	expectedNext := s.lastTick.Add(s.config.TickInterval)
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("scheduler: stopped")
 			return ctx.Err()
-		case <-ticker.C:
+		case tickTime := <-ticker.C:
+			// Record tick drift before processing
+			if s.metrics != nil {
+				drift := tickTime.Sub(expectedNext)
+				s.metrics.TickDrift(drift)
+			}
+			expectedNext = tickTime.Add(s.config.TickInterval)
+
 			if err := s.processTick(ctx); err != nil {
 				log.Printf("scheduler: tick error: %v", err)
 			}
@@ -80,24 +103,40 @@ func (s *Scheduler) Run(ctx context.Context) error {
 }
 
 func (s *Scheduler) processTick(ctx context.Context) error {
-	now := s.clock().UTC()
+	if s.metrics != nil {
+		s.metrics.TickStarted()
+	}
+
+	start := s.clock()
+	now := start.UTC()
+	jobsTriggered := 0
 
 	jobs, err := s.store.GetEnabledJobs(ctx)
 	if err != nil {
+		if s.metrics != nil {
+			s.metrics.TickCompleted(s.clock().Sub(start), 0, err)
+		}
 		return fmt.Errorf("get jobs: %w", err)
 	}
 
 	for _, jws := range jobs {
-		if err := s.processJob(ctx, jws, s.lastTick, now); err != nil {
-			log.Printf("scheduler: job=%s project=%s error: %v", jws.Job.ID, jws.Job.ProjectID, err)
+		triggered, jobErr := s.processJob(ctx, jws, s.lastTick, now)
+		jobsTriggered += triggered
+		if jobErr != nil {
+			log.Printf("scheduler: job=%s project=%s error: %v", jws.Job.ID, jws.Job.ProjectID, jobErr)
 		}
 	}
 
 	s.lastTick = now
+
+	if s.metrics != nil {
+		s.metrics.TickCompleted(s.clock().Sub(start), jobsTriggered, nil)
+	}
+
 	return nil
 }
 
-func (s *Scheduler) processJob(ctx context.Context, jws JobWithSchedule, lastTick, now time.Time) error {
+func (s *Scheduler) processJob(ctx context.Context, jws JobWithSchedule, lastTick, now time.Time) (int, error) {
 	job := jws.Job
 	schedule := jws.Schedule
 
@@ -108,7 +147,7 @@ func (s *Scheduler) processJob(ctx context.Context, jws JobWithSchedule, lastTic
 
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
-		return fmt.Errorf("load tz %s: %w", tz, err)
+		return 0, fmt.Errorf("load tz %s: %w", tz, err)
 	}
 
 	lastTickInTZ := lastTick.In(loc)
@@ -116,24 +155,27 @@ func (s *Scheduler) processJob(ctx context.Context, jws JobWithSchedule, lastTic
 
 	cronSched, err := s.parser.Parse(schedule.CronExpression, tz)
 	if err != nil {
-		return fmt.Errorf("parse cron: %w", err)
+		return 0, fmt.Errorf("parse cron: %w", err)
 	}
 
 	// Loop through all due times since last tick
 	const maxIterations = 1000
 	t := cronSched.Next(lastTickInTZ)
+	triggered := 0
 
 	for i := 0; i < maxIterations && !t.After(nowInTZ); i++ {
 		scheduledAtUTC := t.UTC().Truncate(time.Minute)
 
 		if err := s.emitExecution(ctx, job, scheduledAtUTC, now); err != nil {
 			log.Printf("scheduler: job=%s project=%s at %s error: %v", job.ID, job.ProjectID, scheduledAtUTC.Format(time.RFC3339), err)
+		} else {
+			triggered++
 		}
 
 		t = cronSched.Next(t)
 	}
 
-	return nil
+	return triggered, nil
 }
 
 func (s *Scheduler) emitExecution(ctx context.Context, job domain.Job, scheduledAt, now time.Time) error {
