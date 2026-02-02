@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/djlord-it/easy-cron/internal/domain"
@@ -69,7 +70,9 @@ func (b *EventBus) Emit(ctx context.Context, event domain.TriggerEvent) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
-		// Record emit error
+		// Buffer full: dispatcher is not consuming fast enough.
+		// This event will NOT be delivered. The execution is orphaned.
+		log.Printf("eventbus: buffer full, event dropped execution=%s job=%s", event.ExecutionID, event.JobID)
 		if b.metrics != nil {
 			b.metrics.EmitError()
 		}

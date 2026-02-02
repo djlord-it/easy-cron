@@ -28,9 +28,10 @@ After 4 failed attempts, the execution is marked `failed`. No further retries oc
 
 On SIGINT or SIGTERM:
 1. Scheduler stops immediately (no new executions emitted)
-2. Dispatcher drains buffered events (up to 30 seconds)
-3. HTTP server closes
-4. Process exits with code 0
+2. Reconciler stops (if enabled, no new re-emits)
+3. Dispatcher drains buffered events (up to 30 seconds)
+4. HTTP server closes
+5. Process exits with code 0
 
 ## Non-Guarantees
 
@@ -95,11 +96,13 @@ Redis analytics may undercount executions if Redis is unavailable. Analytics fai
 1. Signal received (SIGINT/SIGTERM)
 2. Scheduler context cancelled
 3. Scheduler goroutine exits (immediate)
-4. Dispatcher context cancelled
-5. Dispatcher drains buffered events (max 30s)
-6. Dispatcher goroutine exits
-7. HTTP server closed
-8. Process exits (code 0)
+4. Reconciler context cancelled (if enabled)
+5. Reconciler goroutine exits (immediate)
+6. Dispatcher context cancelled
+7. Dispatcher drains buffered events (max 30s)
+8. Dispatcher goroutine exits
+9. HTTP server closed
+10. Process exits (code 0)
 ```
 
 ### Drain Timeout
@@ -131,6 +134,100 @@ The dispatcher has 30 seconds to process remaining buffered events. Events still
 ### Recommended Practice
 
 For critical jobs, monitor execution status via the API. If an execution remains in `emitted` state beyond expected delivery time, investigate manually.
+
+## Orphaned Executions
+
+An execution is **orphaned** when it has `status = 'emitted'` but will never be delivered. This happens when:
+
+1. **Buffer full:** Dispatcher can't keep up, scheduler drops event after 5s timeout
+2. **Process crash:** Between DB insert and event emit (rare window)
+3. **Shutdown during dispatch:** Context cancelled before status update
+
+### Detection
+
+**Log signals:**
+```
+scheduler: ORPHAN execution=<uuid> job=<uuid> ...
+eventbus: buffer full, event dropped ...
+```
+
+**Database query:**
+```sql
+-- Find orphaned executions (emitted > 15 minutes ago, no delivery)
+SELECT e.id, e.job_id, e.scheduled_at, e.created_at
+FROM executions e
+LEFT JOIN delivery_attempts d ON d.execution_id = e.id
+WHERE e.status = 'emitted'
+  AND e.created_at < NOW() - INTERVAL '15 minutes'
+  AND d.id IS NULL;
+```
+
+### Definition
+
+An execution is considered orphaned if:
+- Status is `emitted`
+- Created more than 15 minutes ago
+- Has zero delivery attempts
+
+### Automatic Recovery (Reconciler)
+
+EasyCron includes an optional **reconciler** that automatically detects and re-emits orphaned executions.
+
+**To enable:**
+```bash
+RECONCILE_ENABLED=true ./easycron serve
+```
+
+**How it works:**
+1. Periodically scans for executions with `status='emitted'` older than threshold
+2. Re-emits `TriggerEvent` for each orphan to the event bus
+3. Dispatcher processes normally (idempotency is guaranteed)
+
+**Configuration:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RECONCILE_ENABLED` | `false` | Enable reconciler (must be explicit) |
+| `RECONCILE_INTERVAL` | `5m` | How often to scan for orphans |
+| `RECONCILE_THRESHOLD` | `10m` | Age before execution is considered orphaned |
+| `RECONCILE_BATCH_SIZE` | `100` | Max orphans processed per cycle |
+
+**Log signals:**
+```
+reconciler: started (interval=5m0s, threshold=10m0s, batch=100)
+reconciler: found 3 orphaned executions
+reconciler: re-emitted execution=<uuid> job=<uuid> scheduled_at=<time> (age=12m30s)
+reconciler: cycle complete, re-emitted=3, failed=0
+```
+
+**Safety guarantees:**
+- Cannot re-open terminal executions (delivered/failed)
+- Cannot create new executions
+- Bounded batch size prevents unbounded work
+- DB errors abort cycle (retry next interval)
+- Emit errors are logged, orphan retried next cycle
+
+**What reconciler does NOT guarantee:**
+- Still at-most-once under crash (event may be lost before re-emit)
+- Still no exactly-once delivery (webhook may be sent twice)
+- Does not recover executions orphaned during current cycle
+
+### Manual Recovery (Without Reconciler)
+
+If reconciler is disabled, orphaned executions remain in the database.
+
+Manual options:
+1. **Accept the loss:** Most common for non-critical jobs
+2. **Manual trigger:** Call the webhook endpoint directly using the job's configuration
+3. **Database cleanup:** Delete orphaned execution records
+
+### Prevention
+
+- Enable reconciler for automatic recovery
+- Monitor buffer utilization (Prometheus metric: `easycron_eventbus_buffer_size`)
+- Monitor emit errors (Prometheus metric: `easycron_eventbus_emit_errors_total`)
+- Ensure webhook endpoints respond within timeout
+- Scale down job frequency if buffer fills regularly
 
 ## Monitoring
 
@@ -165,19 +262,55 @@ WHERE execution_id = '<uuid>'
 ORDER BY attempt;
 ```
 
-## Capacity
+## Capacity & Hard Limits
 
-### Buffer Size
+### Event Buffer
 
-The in-memory event buffer holds 100 events. If the dispatcher cannot keep up, the scheduler blocks on emit (with 5-second timeout), then drops the event with `ErrBufferFull`.
+| Limit | Value | What Happens When Exceeded |
+|-------|-------|---------------------------|
+| Buffer capacity | 100 events | Scheduler blocks for up to 5s, then drops event |
+| Emit timeout | 5 seconds | Event dropped, execution orphaned |
+
+When buffer fills, you will see:
+```
+eventbus: buffer full, event dropped execution=<uuid> job=<uuid>
+scheduler: ORPHAN execution=<uuid> job=<uuid> scheduled_at=<time> emit failed: event buffer full
+```
 
 ### Connection Pooling
 
-The HTTP webhook sender maintains up to 100 idle connections (10 per host). Adjust if targeting many unique webhook hosts.
+| Limit | Value |
+|-------|-------|
+| Max idle connections | 100 total |
+| Max idle per host | 10 |
+| TLS handshake timeout | 10 seconds |
+| Response header timeout | 30 seconds |
 
-### Tick Interval
+### Scheduler Limits
 
-Default 30 seconds. Shorter intervals increase database load but reduce latency. Cron resolution remains minute-level regardless of tick interval.
+| Limit | Value | What Happens When Exceeded |
+|-------|-------|---------------------------|
+| Fire times per job per tick | 1000 | Additional fires skipped silently |
+| Tick interval | 30s default | Shorter = more DB load, still minute resolution |
+
+### Webhook Limits
+
+| Limit | Value |
+|-------|-------|
+| Timeout per attempt | 1-60 seconds (default 30) |
+| Max attempts | 4 (not configurable) |
+| Max total retry duration | ~12 minutes (0 + 30s + 2m + 10m) |
+
+### Conservative Operating Ranges
+
+| Metric | Safe | Warning | Investigate |
+|--------|------|---------|-------------|
+| Jobs per instance | < 500 | 500-1000 | > 1000 |
+| Executions per minute | < 50 | 50-100 | > 100 |
+| Buffer utilization | < 50% | 50-80% | > 80% |
+| Webhook p99 latency | < 5s | 5-15s | > 15s |
+
+**What breaks first:** Buffer fills → events dropped → orphaned executions.
 
 ## Deployment
 

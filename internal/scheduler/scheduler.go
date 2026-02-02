@@ -193,7 +193,9 @@ func (s *Scheduler) emitExecution(ctx context.Context, job domain.Job, scheduled
 
 	if err := s.store.InsertExecution(ctx, execution); err != nil {
 		if errors.Is(err, ErrDuplicateExecution) {
-			return nil // already emitted
+			// Idempotent: execution already exists, skip silently.
+			// This is expected on scheduler restart or overlapping ticks.
+			return nil
 		}
 		return fmt.Errorf("insert execution: %w", err)
 	}
@@ -208,9 +210,14 @@ func (s *Scheduler) emitExecution(ctx context.Context, job domain.Job, scheduled
 	}
 
 	if err := s.emitter.Emit(ctx, event); err != nil {
+		// CRITICAL: Execution record exists in DB but event was NOT delivered to dispatcher.
+		// This execution is now ORPHANED and will not be retried automatically.
+		// Operators should monitor for executions stuck in 'emitted' status.
+		log.Printf("scheduler: ORPHAN execution=%s job=%s scheduled_at=%s emit failed: %v",
+			executionID, job.ID, scheduledAt.Format(time.RFC3339), err)
 		return fmt.Errorf("emit: %w", err)
 	}
 
-	log.Printf("scheduler: emitted job=%s project=%s scheduled_at=%s", job.ID, job.ProjectID, scheduledAt.Format(time.RFC3339))
+	log.Printf("scheduler: emitted execution=%s job=%s scheduled_at=%s", executionID, job.ID, scheduledAt.Format(time.RFC3339))
 	return nil
 }
