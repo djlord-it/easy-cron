@@ -87,6 +87,8 @@ The API validates:
 - `webhook_url`: Required, must be http or https with valid host
 - `webhook_timeout_seconds`: Optional, 1-60 (default 30)
 
+**Note:** Webhook timeout must be between 1 and 60 seconds. Requests exceeding the timeout are retried (up to 4 attempts total).
+
 Invalid requests return HTTP 400 with error message.
 
 ### List Jobs
@@ -141,9 +143,19 @@ func verifySignature(secret string, body []byte, signature string) bool {
 }
 ```
 
+#### Header Descriptions
+
+| Header | Description |
+|--------|-------------|
+| `X-EasyCron-Event-ID` | Unique ID for this delivery attempt (changes on each retry) |
+| `X-EasyCron-Execution-ID` | Unique ID for the scheduled execution (same across retries) |
+| `X-EasyCron-Signature` | HMAC-SHA256 signature for verification |
+
+Use `X-EasyCron-Execution-ID` for idempotency checks in your webhook handler.
+
 #### Retry Behavior
 
-Failed deliveries are retried with exponential backoff:
+Failed deliveries are retried with stepped backoff (fixed intervals, not exponential):
 - Attempt 1: Immediate
 - Attempt 2: After 30 seconds
 - Attempt 3: After 2 minutes
