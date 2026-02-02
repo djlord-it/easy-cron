@@ -134,19 +134,37 @@ func (s *Store) InsertDeliveryAttempt(ctx context.Context, attempt domain.Delive
 
 // UpdateExecutionStatus updates the status of an execution.
 // Returns dispatcher.ErrStatusTransitionDenied if the execution is already in a terminal state.
+// This uses an atomic UPDATE with WHERE clause to prevent TOCTOU race conditions.
 func (s *Store) UpdateExecutionStatus(ctx context.Context, executionID uuid.UUID, status domain.ExecutionStatus) error {
-	var currentStatus string
-	err := s.db.QueryRowContext(ctx, queryGetExecutionStatus, executionID).Scan(&currentStatus)
+	// Single atomic update with guard in WHERE clause.
+	// PostgreSQL acquires row lock before evaluating WHERE,
+	// ensuring serialized access under concurrency.
+	result, err := s.db.ExecContext(ctx, queryUpdateExecutionStatus, string(status), executionID)
 	if err != nil {
 		return err
 	}
 
-	if currentStatus == string(domain.ExecutionStatusDelivered) || currentStatus == string(domain.ExecutionStatusFailed) {
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected == 0 {
+		// Either: (a) execution not found, or (b) already in terminal state.
+		// Distinguish by checking if the row exists.
+		var currentStatus string
+		err := s.db.QueryRowContext(ctx, queryGetExecutionStatus, executionID).Scan(&currentStatus)
+		if err == sql.ErrNoRows {
+			return sql.ErrNoRows
+		}
+		if err != nil {
+			return err
+		}
+		// Row exists but wasn't updated => terminal state
 		return dispatcher.ErrStatusTransitionDenied
 	}
 
-	_, err = s.db.ExecContext(ctx, queryUpdateExecutionStatus, string(status), executionID)
-	return err
+	return nil
 }
 
 // isDuplicateKeyError checks if the error is a PostgreSQL unique violation.

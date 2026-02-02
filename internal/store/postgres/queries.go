@@ -37,7 +37,10 @@ SELECT status FROM executions WHERE id = $1
 `
 
 const queryUpdateExecutionStatus = `
-UPDATE executions SET status = $1 WHERE id = $2
+UPDATE executions
+SET status = $1
+WHERE id = $2
+  AND status NOT IN ('delivered', 'failed')
 `
 
 const queryInsertSchedule = `
