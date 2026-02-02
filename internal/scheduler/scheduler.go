@@ -14,8 +14,13 @@ import (
 
 var ErrDuplicateExecution = errors.New("execution already exists")
 
+// Pagination defaults for scheduler job loading.
+const (
+	DefaultJobPageSize = 100
+)
+
 type Store interface {
-	GetEnabledJobs(ctx context.Context) ([]JobWithSchedule, error)
+	GetEnabledJobs(ctx context.Context, limit, offset int) ([]JobWithSchedule, error)
 	InsertExecution(ctx context.Context, exec domain.Execution) error
 }
 
@@ -111,20 +116,30 @@ func (s *Scheduler) processTick(ctx context.Context) error {
 	now := start.UTC()
 	jobsTriggered := 0
 
-	jobs, err := s.store.GetEnabledJobs(ctx)
-	if err != nil {
-		if s.metrics != nil {
-			s.metrics.TickCompleted(s.clock().Sub(start), 0, err)
+	// Paginate through all enabled jobs to avoid loading unbounded data into memory.
+	offset := 0
+	for {
+		jobs, err := s.store.GetEnabledJobs(ctx, DefaultJobPageSize, offset)
+		if err != nil {
+			if s.metrics != nil {
+				s.metrics.TickCompleted(s.clock().Sub(start), jobsTriggered, err)
+			}
+			return fmt.Errorf("get jobs: %w", err)
 		}
-		return fmt.Errorf("get jobs: %w", err)
-	}
 
-	for _, jws := range jobs {
-		triggered, jobErr := s.processJob(ctx, jws, s.lastTick, now)
-		jobsTriggered += triggered
-		if jobErr != nil {
-			log.Printf("scheduler: job=%s project=%s error: %v", jws.Job.ID, jws.Job.ProjectID, jobErr)
+		for _, jws := range jobs {
+			triggered, jobErr := s.processJob(ctx, jws, s.lastTick, now)
+			jobsTriggered += triggered
+			if jobErr != nil {
+				log.Printf("scheduler: job=%s project=%s error: %v", jws.Job.ID, jws.Job.ProjectID, jobErr)
+			}
 		}
+
+		// If we got fewer than requested, we've reached the end.
+		if len(jobs) < DefaultJobPageSize {
+			break
+		}
+		offset += len(jobs)
 	}
 
 	s.lastTick = now

@@ -23,9 +23,9 @@ func New(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
-// GetEnabledJobs returns all enabled jobs with their schedules.
-func (s *Store) GetEnabledJobs(ctx context.Context) ([]scheduler.JobWithSchedule, error) {
-	rows, err := s.db.QueryContext(ctx, queryGetEnabledJobs)
+// GetEnabledJobs returns enabled jobs with their schedules, paginated by limit and offset.
+func (s *Store) GetEnabledJobs(ctx context.Context, limit, offset int) ([]scheduler.JobWithSchedule, error) {
+	rows, err := s.db.QueryContext(ctx, queryGetEnabledJobs, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -232,9 +232,9 @@ func (s *Store) CreateJob(ctx context.Context, job domain.Job, schedule domain.S
 	return tx.Commit()
 }
 
-// ListJobs returns all jobs for a project with their schedules.
-func (s *Store) ListJobs(ctx context.Context, projectID uuid.UUID) ([]api.JobWithSchedule, error) {
-	rows, err := s.db.QueryContext(ctx, queryListJobs, projectID)
+// ListJobs returns jobs for a project with their schedules, paginated by limit and offset.
+func (s *Store) ListJobs(ctx context.Context, projectID uuid.UUID, limit, offset int) ([]api.JobWithSchedule, error) {
+	rows, err := s.db.QueryContext(ctx, queryListJobs, projectID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -279,9 +279,9 @@ func (s *Store) ListJobs(ctx context.Context, projectID uuid.UUID) ([]api.JobWit
 	return result, nil
 }
 
-// ListExecutions returns all executions for a job.
-func (s *Store) ListExecutions(ctx context.Context, jobID uuid.UUID) ([]domain.Execution, error) {
-	rows, err := s.db.QueryContext(ctx, queryListExecutions, jobID)
+// ListExecutions returns executions for a job, paginated by limit and offset.
+func (s *Store) ListExecutions(ctx context.Context, jobID uuid.UUID, limit, offset int) ([]domain.Execution, error) {
+	rows, err := s.db.QueryContext(ctx, queryListExecutions, jobID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
