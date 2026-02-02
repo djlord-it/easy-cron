@@ -1,3 +1,12 @@
+// NOTICE: This file is DEAD CODE and is NOT used by `easycron serve`.
+//
+// This is a standalone worker stub that was created for experimentation.
+// It uses stub implementations that do nothing and has no database connection.
+//
+// DO NOT USE IN PRODUCTION. Use `easycron serve` instead.
+//
+// This file may be removed in a future release.
+
 package main
 
 import (
@@ -20,11 +29,16 @@ import (
 )
 
 func main() {
-	// TODO: replace with real implementations
+	// DEAD CODE WARNING: This worker uses stub implementations.
+	// It exists for reference only and should not be run.
+	log.Println("worker: FATAL - this binary is a stub and should not be used")
+	log.Println("worker: use 'easycron serve' instead")
+	os.Exit(1)
+
+	// The code below is unreachable but retained for reference.
 	store := &stubStore{}
 	cronParser := &stubCronParser{}
 
-	// WARNING: Stub implementations are active. Jobs will not execute correctly.
 	log.Println("worker: WARNING - using stub store and cron parser (replace with real implementations before production)")
 
 	bus := channel.NewEventBus(100)

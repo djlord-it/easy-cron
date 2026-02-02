@@ -45,19 +45,58 @@ type Config struct {
 	// Default: "9090"
 	// Environment variable: METRICS_PORT
 	MetricsPort string `json:"metrics_port"`
+
+	// ReconcileEnabled enables the orphan execution reconciler.
+	// Default: false
+	// Environment variable: RECONCILE_ENABLED
+	ReconcileEnabled bool `json:"reconcile_enabled"`
+
+	// ReconcileInterval is how often the reconciler scans for orphans.
+	// Default: 5m
+	// Environment variable: RECONCILE_INTERVAL
+	ReconcileInterval time.Duration `json:"-"`
+
+	// ReconcileIntervalStr is the string representation for JSON output.
+	ReconcileIntervalStr string `json:"reconcile_interval"`
+
+	// ReconcileThreshold is the age after which an emitted execution is orphaned.
+	// Default: 10m
+	// Environment variable: RECONCILE_THRESHOLD
+	ReconcileThreshold time.Duration `json:"-"`
+
+	// ReconcileThresholdStr is the string representation for JSON output.
+	ReconcileThresholdStr string `json:"reconcile_threshold"`
+
+	// ReconcileBatchSize is the max orphans processed per cycle.
+	// Default: 100
+	// Environment variable: RECONCILE_BATCH_SIZE
+	ReconcileBatchSize int `json:"reconcile_batch_size"`
 }
 
 // Load reads configuration from environment variables.
 // It applies defaults for optional values.
 func Load() Config {
 	cfg := Config{
-		DatabaseURL:     os.Getenv("DATABASE_URL"),
-		RedisAddr:       os.Getenv("REDIS_ADDR"),
-		HTTPAddr:        os.Getenv("HTTP_ADDR"),
-		TickIntervalStr: os.Getenv("TICK_INTERVAL"),
-		MetricsEnabled:  os.Getenv("METRICS_ENABLED") == "true",
-		MetricsPath:     os.Getenv("METRICS_PATH"),
-		MetricsPort:     os.Getenv("METRICS_PORT"),
+		DatabaseURL:           os.Getenv("DATABASE_URL"),
+		RedisAddr:             os.Getenv("REDIS_ADDR"),
+		HTTPAddr:              os.Getenv("HTTP_ADDR"),
+		TickIntervalStr:       os.Getenv("TICK_INTERVAL"),
+		MetricsEnabled:        os.Getenv("METRICS_ENABLED") == "true",
+		MetricsPath:           os.Getenv("METRICS_PATH"),
+		MetricsPort:           os.Getenv("METRICS_PORT"),
+		ReconcileEnabled:      os.Getenv("RECONCILE_ENABLED") == "true",
+		ReconcileIntervalStr:  os.Getenv("RECONCILE_INTERVAL"),
+		ReconcileThresholdStr: os.Getenv("RECONCILE_THRESHOLD"),
+	}
+
+	// Parse batch size (default 100)
+	if batchStr := os.Getenv("RECONCILE_BATCH_SIZE"); batchStr != "" {
+		if batch, err := parseInt(batchStr); err == nil && batch > 0 {
+			cfg.ReconcileBatchSize = batch
+		}
+	}
+	if cfg.ReconcileBatchSize == 0 {
+		cfg.ReconcileBatchSize = 100
 	}
 
 	// Apply defaults
@@ -78,33 +117,65 @@ func Load() Config {
 	if cfg.MetricsPort == "" {
 		cfg.MetricsPort = "9090"
 	}
+	if cfg.ReconcileIntervalStr == "" {
+		cfg.ReconcileIntervalStr = "5m"
+	}
+	if cfg.ReconcileThresholdStr == "" {
+		cfg.ReconcileThresholdStr = "10m"
+	}
 
-	// Parse tick interval (validation happens separately)
+	// Parse durations (validation happens separately)
 	if d, err := time.ParseDuration(cfg.TickIntervalStr); err == nil {
 		cfg.TickInterval = d
+	}
+	if d, err := time.ParseDuration(cfg.ReconcileIntervalStr); err == nil {
+		cfg.ReconcileInterval = d
+	}
+	if d, err := time.ParseDuration(cfg.ReconcileThresholdStr); err == nil {
+		cfg.ReconcileThreshold = d
 	}
 
 	return cfg
 }
 
+// parseInt parses a string as an integer.
+func parseInt(s string) (int, error) {
+	var n int
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, os.ErrInvalid
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, nil
+}
+
 // MaskedJSON returns the configuration as JSON with secrets masked.
 func (c Config) MaskedJSON() ([]byte, error) {
 	masked := struct {
-		DatabaseURL    string `json:"database_url"`
-		RedisAddr      string `json:"redis_addr,omitempty"`
-		HTTPAddr       string `json:"http_addr"`
-		TickInterval   string `json:"tick_interval"`
-		MetricsEnabled bool   `json:"metrics_enabled"`
-		MetricsPath    string `json:"metrics_path"`
-		MetricsPort    string `json:"metrics_port"`
+		DatabaseURL        string `json:"database_url"`
+		RedisAddr          string `json:"redis_addr,omitempty"`
+		HTTPAddr           string `json:"http_addr"`
+		TickInterval       string `json:"tick_interval"`
+		MetricsEnabled     bool   `json:"metrics_enabled"`
+		MetricsPath        string `json:"metrics_path"`
+		MetricsPort        string `json:"metrics_port"`
+		ReconcileEnabled   bool   `json:"reconcile_enabled"`
+		ReconcileInterval  string `json:"reconcile_interval"`
+		ReconcileThreshold string `json:"reconcile_threshold"`
+		ReconcileBatchSize int    `json:"reconcile_batch_size"`
 	}{
-		DatabaseURL:    maskSecret(c.DatabaseURL),
-		RedisAddr:      c.RedisAddr,
-		HTTPAddr:       c.HTTPAddr,
-		TickInterval:   c.TickIntervalStr,
-		MetricsEnabled: c.MetricsEnabled,
-		MetricsPath:    c.MetricsPath,
-		MetricsPort:    c.MetricsPort,
+		DatabaseURL:        maskSecret(c.DatabaseURL),
+		RedisAddr:          c.RedisAddr,
+		HTTPAddr:           c.HTTPAddr,
+		TickInterval:       c.TickIntervalStr,
+		MetricsEnabled:     c.MetricsEnabled,
+		MetricsPath:        c.MetricsPath,
+		MetricsPort:        c.MetricsPort,
+		ReconcileEnabled:   c.ReconcileEnabled,
+		ReconcileInterval:  c.ReconcileIntervalStr,
+		ReconcileThreshold: c.ReconcileThresholdStr,
+		ReconcileBatchSize: c.ReconcileBatchSize,
 	}
 	return json.MarshalIndent(masked, "", "  ")
 }

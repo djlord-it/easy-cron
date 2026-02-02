@@ -80,3 +80,12 @@ deleted_executions AS (
 )
 DELETE FROM jobs WHERE id = $1 AND project_id = $2
 RETURNING id`
+
+const queryGetOrphanedExecutions = `
+SELECT id, job_id, project_id, scheduled_at, fired_at, status, created_at
+FROM executions
+WHERE status = 'emitted'
+  AND created_at < $1
+ORDER BY created_at ASC
+LIMIT $2
+`

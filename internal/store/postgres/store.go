@@ -309,6 +309,44 @@ func (s *Store) DeleteJob(ctx context.Context, jobID, projectID uuid.UUID) error
 	return nil
 }
 
+// GetOrphanedExecutions returns executions that are stuck in 'emitted' status
+// and were created before the given threshold time.
+// Results are ordered by created_at ASC (oldest first) and limited to maxResults.
+func (s *Store) GetOrphanedExecutions(ctx context.Context, olderThan time.Time, maxResults int) ([]domain.Execution, error) {
+	rows, err := s.db.QueryContext(ctx, queryGetOrphanedExecutions, olderThan, maxResults)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []domain.Execution
+	for rows.Next() {
+		var exec domain.Execution
+		var status string
+
+		err := rows.Scan(
+			&exec.ID,
+			&exec.JobID,
+			&exec.ProjectID,
+			&exec.ScheduledAt,
+			&exec.FiredAt,
+			&status,
+			&exec.CreatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		exec.Status = domain.ExecutionStatus(status)
+		result = append(result, exec)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 // Compile-time interface assertions
 var (
 	_ scheduler.Store  = (*Store)(nil)

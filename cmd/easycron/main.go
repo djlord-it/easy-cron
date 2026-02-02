@@ -23,6 +23,7 @@ import (
 	"github.com/djlord-it/easy-cron/internal/cron"
 	"github.com/djlord-it/easy-cron/internal/dispatcher"
 	"github.com/djlord-it/easy-cron/internal/metrics"
+	"github.com/djlord-it/easy-cron/internal/reconciler"
 	"github.com/djlord-it/easy-cron/internal/scheduler"
 	"github.com/djlord-it/easy-cron/internal/store/postgres"
 	"github.com/djlord-it/easy-cron/internal/transport/channel"
@@ -104,13 +105,17 @@ Commands:
   version    Print version information
 
 Environment Variables:
-  DATABASE_URL      PostgreSQL connection string (required)
-  REDIS_ADDR        Redis address for analytics (optional)
-  HTTP_ADDR         HTTP server address (default: ":8080")
-  TICK_INTERVAL     Scheduler tick interval (default: "30s")
-  METRICS_ENABLED   Enable Prometheus metrics (default: "false")
-  METRICS_PATH      Metrics endpoint path (default: "/metrics")
-  METRICS_PORT      Metrics server port (default: "9090")`)
+  DATABASE_URL          PostgreSQL connection string (required)
+  REDIS_ADDR            Redis address for analytics (optional)
+  HTTP_ADDR             HTTP server address (default: ":8080")
+  TICK_INTERVAL         Scheduler tick interval (default: "30s")
+  METRICS_ENABLED       Enable Prometheus metrics (default: "false")
+  METRICS_PATH          Metrics endpoint path (default: "/metrics")
+  METRICS_PORT          Metrics server port (default: "9090")
+  RECONCILE_ENABLED     Enable orphan execution reconciler (default: "false")
+  RECONCILE_INTERVAL    How often to scan for orphans (default: "5m")
+  RECONCILE_THRESHOLD   Age before execution is orphaned (default: "10m")
+  RECONCILE_BATCH_SIZE  Max orphans per cycle (default: "100")`)
 }
 
 func runServe() int {
@@ -215,12 +220,14 @@ func runServe() int {
 		}
 	}()
 
-	// Use separate contexts for scheduler and dispatcher to enable ordered shutdown.
+	// Use separate contexts for scheduler, dispatcher, and reconciler to enable ordered shutdown.
 	schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
 	dispatcherCtx, cancelDispatcher := context.WithCancel(context.Background())
 
 	var schedulerWg sync.WaitGroup
 	var dispatcherWg sync.WaitGroup
+	var reconcilerWg sync.WaitGroup
+	var cancelReconciler context.CancelFunc
 
 	schedulerWg.Add(1)
 	go func() {
@@ -233,6 +240,30 @@ func runServe() int {
 		defer dispatcherWg.Done()
 		disp.Run(dispatcherCtx, bus.Channel())
 	}()
+
+	// Start reconciler if enabled
+	if cfg.ReconcileEnabled {
+		var reconcilerCtx context.Context
+		reconcilerCtx, cancelReconciler = context.WithCancel(context.Background())
+		recon := reconciler.New(
+			reconciler.Config{
+				Interval:  cfg.ReconcileInterval,
+				Threshold: cfg.ReconcileThreshold,
+				BatchSize: cfg.ReconcileBatchSize,
+			},
+			store,
+			bus,
+		)
+		reconcilerWg.Add(1)
+		go func() {
+			defer reconcilerWg.Done()
+			recon.Run(reconcilerCtx)
+		}()
+		log.Printf("easycron: reconciler enabled (interval=%s, threshold=%s, batch=%d)",
+			cfg.ReconcileInterval, cfg.ReconcileThreshold, cfg.ReconcileBatchSize)
+	} else {
+		log.Println("easycron: RECONCILE_ENABLED not set; reconciler disabled")
+	}
 
 	log.Printf("easycron: started (tick=%s, http=%s)", cfg.TickInterval, cfg.HTTPAddr)
 
@@ -248,18 +279,26 @@ func runServe() int {
 	schedulerWg.Wait()
 	log.Println("easycron: scheduler stopped")
 
-	// Phase 2: Stop dispatcher (will drain buffered events before returning)
+	// Phase 2: Stop reconciler (no new re-emits)
+	if cancelReconciler != nil {
+		log.Println("easycron: stopping reconciler...")
+		cancelReconciler()
+		reconcilerWg.Wait()
+		log.Println("easycron: reconciler stopped")
+	}
+
+	// Phase 3: Stop dispatcher (will drain buffered events before returning)
 	log.Println("easycron: stopping dispatcher (draining events)...")
 	cancelDispatcher()
 	dispatcherWg.Wait()
 	log.Println("easycron: dispatcher stopped")
 
-	// Phase 3: Stop HTTP server
+	// Phase 4: Stop HTTP server
 	log.Println("easycron: stopping http server...")
 	httpServer.Close()
 	log.Println("easycron: http server stopped")
 
-	// Phase 4: Stop metrics server if running
+	// Phase 5: Stop metrics server if running
 	if metricsServer != nil {
 		log.Println("easycron: stopping metrics server...")
 		metricsServer.Close()

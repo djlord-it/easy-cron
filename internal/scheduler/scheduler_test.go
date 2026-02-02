@@ -1,0 +1,334 @@
+package scheduler
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/djlord-it/easy-cron/internal/domain"
+)
+
+// mockStore tracks executions and enforces idempotency.
+type mockStore struct {
+	mu         sync.Mutex
+	executions map[string]domain.Execution // key: job_id + scheduled_at
+	jobs       []JobWithSchedule
+}
+
+func newMockStore() *mockStore {
+	return &mockStore{
+		executions: make(map[string]domain.Execution),
+	}
+}
+
+func (s *mockStore) GetEnabledJobs(ctx context.Context) ([]JobWithSchedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.jobs, nil
+}
+
+func (s *mockStore) InsertExecution(ctx context.Context, exec domain.Execution) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := exec.JobID.String() + "|" + exec.ScheduledAt.Format(time.RFC3339)
+	if _, exists := s.executions[key]; exists {
+		return ErrDuplicateExecution
+	}
+	s.executions[key] = exec
+	return nil
+}
+
+func (s *mockStore) addJob(job domain.Job, schedule domain.Schedule) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jobs = append(s.jobs, JobWithSchedule{Job: job, Schedule: schedule})
+}
+
+func (s *mockStore) executionCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.executions)
+}
+
+// mockEmitter tracks emitted events.
+type mockEmitter struct {
+	mu     sync.Mutex
+	events []domain.TriggerEvent
+}
+
+func (e *mockEmitter) Emit(ctx context.Context, event domain.TriggerEvent) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.events = append(e.events, event)
+	return nil
+}
+
+func (e *mockEmitter) eventCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.events)
+}
+
+// mockCronParser returns a schedule that fires at fixed times.
+type mockCronParser struct {
+	fireTimes []time.Time
+}
+
+func (p *mockCronParser) Parse(expression string, timezone string) (CronSchedule, error) {
+	return &mockCronSchedule{fireTimes: p.fireTimes}, nil
+}
+
+type mockCronSchedule struct {
+	fireTimes []time.Time
+	index     int
+}
+
+func (s *mockCronSchedule) Next(after time.Time) time.Time {
+	for _, t := range s.fireTimes {
+		if t.After(after) {
+			return t
+		}
+	}
+	// Return far future if no more fire times
+	return after.Add(24 * time.Hour)
+}
+
+// TestScheduler_Idempotency_SameJobSameTime verifies that the scheduler
+// cannot create duplicate executions for the same (job_id, scheduled_at).
+func TestScheduler_Idempotency_SameJobSameTime(t *testing.T) {
+	store := newMockStore()
+	emitter := &mockEmitter{}
+
+	jobID := uuid.New()
+	projectID := uuid.New()
+	scheduleID := uuid.New()
+
+	// Fire time that will be within our tick window
+	fireTime := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	store.addJob(
+		domain.Job{
+			ID:         jobID,
+			ProjectID:  projectID,
+			Name:       "test-job",
+			Enabled:    true,
+			ScheduleID: scheduleID,
+		},
+		domain.Schedule{
+			ID:             scheduleID,
+			CronExpression: "0 * * * *",
+			Timezone:       "UTC",
+		},
+	)
+
+	parser := &mockCronParser{fireTimes: []time.Time{fireTime}}
+
+	sched := New(
+		Config{TickInterval: time.Minute},
+		store,
+		parser,
+		emitter,
+	)
+
+	// Simulate clock at fire time + 30 seconds
+	now := fireTime.Add(30 * time.Second)
+	sched.clock = func() time.Time { return now }
+	sched.lastTick = fireTime.Add(-time.Minute) // Last tick was before fire time
+
+	ctx := context.Background()
+
+	// First tick - should create execution
+	err := sched.processTick(ctx)
+	if err != nil {
+		t.Fatalf("first tick failed: %v", err)
+	}
+
+	if store.executionCount() != 1 {
+		t.Errorf("expected 1 execution after first tick, got %d", store.executionCount())
+	}
+	if emitter.eventCount() != 1 {
+		t.Errorf("expected 1 event after first tick, got %d", emitter.eventCount())
+	}
+
+	// Reset lastTick to simulate overlapping tick or restart
+	sched.lastTick = fireTime.Add(-time.Minute)
+
+	// Second tick with same time window - should NOT create duplicate
+	err = sched.processTick(ctx)
+	if err != nil {
+		t.Fatalf("second tick failed: %v", err)
+	}
+
+	// Still only 1 execution (idempotent)
+	if store.executionCount() != 1 {
+		t.Errorf("expected 1 execution after second tick (idempotent), got %d", store.executionCount())
+	}
+
+	// Event count should also be 1 (no duplicate emit)
+	if emitter.eventCount() != 1 {
+		t.Errorf("expected 1 event after second tick (idempotent), got %d", emitter.eventCount())
+	}
+}
+
+// TestScheduler_Idempotency_AcrossTicks verifies idempotency is maintained
+// even when the scheduler processes the same fire time across multiple ticks.
+func TestScheduler_Idempotency_AcrossTicks(t *testing.T) {
+	store := newMockStore()
+	emitter := &mockEmitter{}
+
+	jobID := uuid.New()
+	projectID := uuid.New()
+	scheduleID := uuid.New()
+
+	fireTime := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	store.addJob(
+		domain.Job{
+			ID:         jobID,
+			ProjectID:  projectID,
+			Name:       "test-job",
+			Enabled:    true,
+			ScheduleID: scheduleID,
+		},
+		domain.Schedule{
+			ID:             scheduleID,
+			CronExpression: "0 * * * *",
+			Timezone:       "UTC",
+		},
+	)
+
+	parser := &mockCronParser{fireTimes: []time.Time{fireTime}}
+
+	sched := New(
+		Config{TickInterval: 30 * time.Second},
+		store,
+		parser,
+		emitter,
+	)
+
+	ctx := context.Background()
+
+	// Tick 1: 09:59:30 -> 10:00:00 (fire time is in window)
+	sched.clock = func() time.Time { return fireTime }
+	sched.lastTick = fireTime.Add(-30 * time.Second)
+	_ = sched.processTick(ctx)
+
+	// Tick 2: 10:00:00 -> 10:00:30 (overlapping due to clock skew or restart)
+	// lastTick might be reset to before fire time
+	sched.clock = func() time.Time { return fireTime.Add(30 * time.Second) }
+	sched.lastTick = fireTime.Add(-30 * time.Second) // Simulate restart
+	_ = sched.processTick(ctx)
+
+	// Tick 3: Another attempt at same window
+	sched.clock = func() time.Time { return fireTime.Add(45 * time.Second) }
+	sched.lastTick = fireTime.Add(-15 * time.Second)
+	_ = sched.processTick(ctx)
+
+	// Should still have exactly 1 execution
+	if store.executionCount() != 1 {
+		t.Errorf("expected exactly 1 execution across all ticks, got %d", store.executionCount())
+	}
+}
+
+// TestScheduler_DifferentJobsSameTime verifies that different jobs can have
+// executions at the same scheduled time.
+func TestScheduler_DifferentJobsSameTime(t *testing.T) {
+	store := newMockStore()
+	emitter := &mockEmitter{}
+
+	projectID := uuid.New()
+	fireTime := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	// Add two jobs
+	for i := 0; i < 2; i++ {
+		jobID := uuid.New()
+		scheduleID := uuid.New()
+		store.addJob(
+			domain.Job{
+				ID:         jobID,
+				ProjectID:  projectID,
+				Name:       "test-job",
+				Enabled:    true,
+				ScheduleID: scheduleID,
+			},
+			domain.Schedule{
+				ID:             scheduleID,
+				CronExpression: "0 * * * *",
+				Timezone:       "UTC",
+			},
+		)
+	}
+
+	parser := &mockCronParser{fireTimes: []time.Time{fireTime}}
+
+	sched := New(
+		Config{TickInterval: time.Minute},
+		store,
+		parser,
+		emitter,
+	)
+
+	sched.clock = func() time.Time { return fireTime.Add(30 * time.Second) }
+	sched.lastTick = fireTime.Add(-time.Minute)
+
+	ctx := context.Background()
+	_ = sched.processTick(ctx)
+
+	// Should have 2 executions (one per job)
+	if store.executionCount() != 2 {
+		t.Errorf("expected 2 executions (one per job), got %d", store.executionCount())
+	}
+}
+
+// TestScheduler_SameJobDifferentTimes verifies that the same job can have
+// multiple executions at different scheduled times.
+func TestScheduler_SameJobDifferentTimes(t *testing.T) {
+	store := newMockStore()
+	emitter := &mockEmitter{}
+
+	jobID := uuid.New()
+	projectID := uuid.New()
+	scheduleID := uuid.New()
+
+	fireTime1 := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+	fireTime2 := time.Date(2024, 1, 15, 11, 0, 0, 0, time.UTC)
+
+	store.addJob(
+		domain.Job{
+			ID:         jobID,
+			ProjectID:  projectID,
+			Name:       "test-job",
+			Enabled:    true,
+			ScheduleID: scheduleID,
+		},
+		domain.Schedule{
+			ID:             scheduleID,
+			CronExpression: "0 * * * *",
+			Timezone:       "UTC",
+		},
+	)
+
+	parser := &mockCronParser{fireTimes: []time.Time{fireTime1, fireTime2}}
+
+	sched := New(
+		Config{TickInterval: 2 * time.Hour}, // Large window to capture both
+		store,
+		parser,
+		emitter,
+	)
+
+	sched.clock = func() time.Time { return fireTime2.Add(30 * time.Second) }
+	sched.lastTick = fireTime1.Add(-time.Minute)
+
+	ctx := context.Background()
+	_ = sched.processTick(ctx)
+
+	// Should have 2 executions (same job, different times)
+	if store.executionCount() != 2 {
+		t.Errorf("expected 2 executions (different times), got %d", store.executionCount())
+	}
+}
