@@ -30,6 +30,21 @@ type Config struct {
 
 	// TickIntervalStr is the string representation for JSON output.
 	TickIntervalStr string `json:"tick_interval"`
+
+	// MetricsEnabled enables Prometheus metrics.
+	// Default: false
+	// Environment variable: METRICS_ENABLED
+	MetricsEnabled bool `json:"metrics_enabled"`
+
+	// MetricsPath is the HTTP path for the metrics endpoint.
+	// Default: "/metrics"
+	// Environment variable: METRICS_PATH
+	MetricsPath string `json:"metrics_path"`
+
+	// MetricsPort is the port for the metrics HTTP server.
+	// Default: "9090"
+	// Environment variable: METRICS_PORT
+	MetricsPort string `json:"metrics_port"`
 }
 
 // Load reads configuration from environment variables.
@@ -40,6 +55,9 @@ func Load() Config {
 		RedisAddr:       os.Getenv("REDIS_ADDR"),
 		HTTPAddr:        os.Getenv("HTTP_ADDR"),
 		TickIntervalStr: os.Getenv("TICK_INTERVAL"),
+		MetricsEnabled:  os.Getenv("METRICS_ENABLED") == "true",
+		MetricsPath:     os.Getenv("METRICS_PATH"),
+		MetricsPort:     os.Getenv("METRICS_PORT"),
 	}
 
 	// Apply defaults
@@ -54,6 +72,12 @@ func Load() Config {
 	if cfg.TickIntervalStr == "" {
 		cfg.TickIntervalStr = "30s"
 	}
+	if cfg.MetricsPath == "" {
+		cfg.MetricsPath = "/metrics"
+	}
+	if cfg.MetricsPort == "" {
+		cfg.MetricsPort = "9090"
+	}
 
 	// Parse tick interval (validation happens separately)
 	if d, err := time.ParseDuration(cfg.TickIntervalStr); err == nil {
@@ -66,15 +90,21 @@ func Load() Config {
 // MaskedJSON returns the configuration as JSON with secrets masked.
 func (c Config) MaskedJSON() ([]byte, error) {
 	masked := struct {
-		DatabaseURL  string `json:"database_url"`
-		RedisAddr    string `json:"redis_addr,omitempty"`
-		HTTPAddr     string `json:"http_addr"`
-		TickInterval string `json:"tick_interval"`
+		DatabaseURL    string `json:"database_url"`
+		RedisAddr      string `json:"redis_addr,omitempty"`
+		HTTPAddr       string `json:"http_addr"`
+		TickInterval   string `json:"tick_interval"`
+		MetricsEnabled bool   `json:"metrics_enabled"`
+		MetricsPath    string `json:"metrics_path"`
+		MetricsPort    string `json:"metrics_port"`
 	}{
-		DatabaseURL:  maskSecret(c.DatabaseURL),
-		RedisAddr:    c.RedisAddr,
-		HTTPAddr:     c.HTTPAddr,
-		TickInterval: c.TickIntervalStr,
+		DatabaseURL:    maskSecret(c.DatabaseURL),
+		RedisAddr:      c.RedisAddr,
+		HTTPAddr:       c.HTTPAddr,
+		TickInterval:   c.TickIntervalStr,
+		MetricsEnabled: c.MetricsEnabled,
+		MetricsPath:    c.MetricsPath,
+		MetricsPort:    c.MetricsPort,
 	}
 	return json.MarshalIndent(masked, "", "  ")
 }

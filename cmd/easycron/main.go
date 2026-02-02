@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/djlord-it/easy-cron/internal/analytics"
@@ -20,6 +22,7 @@ import (
 	"github.com/djlord-it/easy-cron/internal/config"
 	"github.com/djlord-it/easy-cron/internal/cron"
 	"github.com/djlord-it/easy-cron/internal/dispatcher"
+	"github.com/djlord-it/easy-cron/internal/metrics"
 	"github.com/djlord-it/easy-cron/internal/scheduler"
 	"github.com/djlord-it/easy-cron/internal/store/postgres"
 	"github.com/djlord-it/easy-cron/internal/transport/channel"
@@ -101,10 +104,13 @@ Commands:
   version    Print version information
 
 Environment Variables:
-  DATABASE_URL    PostgreSQL connection string (required)
-  REDIS_ADDR      Redis address for analytics (optional)
-  HTTP_ADDR       HTTP server address (default: ":8080")
-  TICK_INTERVAL   Scheduler tick interval (default: "30s")`)
+  DATABASE_URL      PostgreSQL connection string (required)
+  REDIS_ADDR        Redis address for analytics (optional)
+  HTTP_ADDR         HTTP server address (default: ":8080")
+  TICK_INTERVAL     Scheduler tick interval (default: "30s")
+  METRICS_ENABLED   Enable Prometheus metrics (default: "false")
+  METRICS_PATH      Metrics endpoint path (default: "/metrics")
+  METRICS_PORT      Metrics server port (default: "9090")`)
 }
 
 func runServe() int {
@@ -130,8 +136,39 @@ func runServe() int {
 
 	store := postgres.New(db)
 	cronParser := &cronParserAdapter{parser: cron.NewParser()}
-	bus := channel.NewEventBus(100)
 	webhookSender := dispatcher.NewHTTPWebhookSender()
+
+	// Initialize metrics sink (optional)
+	var metricsSink *metrics.PrometheusSink
+	var metricsServer *http.Server
+
+	if cfg.MetricsEnabled {
+		metricsSink = metrics.NewPrometheusSink(prometheus.DefaultRegisterer)
+		log.Printf("easycron: metrics enabled (port=%s, path=%s)", cfg.MetricsPort, cfg.MetricsPath)
+
+		// Start metrics HTTP server on separate port
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle(cfg.MetricsPath, promhttp.Handler())
+		metricsServer = &http.Server{
+			Addr:    ":" + cfg.MetricsPort,
+			Handler: metricsMux,
+		}
+		go func() {
+			log.Printf("easycron: metrics server listening on :%s", cfg.MetricsPort)
+			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("easycron: metrics server error: %v", err)
+			}
+		}()
+	} else {
+		log.Println("easycron: METRICS_ENABLED not set; metrics disabled")
+	}
+
+	// Create event bus with optional metrics
+	var busOpts []channel.Option
+	if metricsSink != nil {
+		busOpts = append(busOpts, channel.WithMetrics(metricsSink))
+	}
+	bus := channel.NewEventBus(100, busOpts...)
 
 	sched := scheduler.New(
 		scheduler.Config{TickInterval: cfg.TickInterval},
@@ -139,8 +176,14 @@ func runServe() int {
 		cronParser,
 		bus,
 	)
+	if metricsSink != nil {
+		sched = sched.WithMetrics(metricsSink)
+	}
 
 	disp := dispatcher.New(store, webhookSender)
+	if metricsSink != nil {
+		disp = disp.WithMetrics(metricsSink)
+	}
 
 	// Wire analytics if Redis is configured
 	if cfg.RedisAddr != "" {
@@ -215,6 +258,13 @@ func runServe() int {
 	log.Println("easycron: stopping http server...")
 	httpServer.Close()
 	log.Println("easycron: http server stopped")
+
+	// Phase 4: Stop metrics server if running
+	if metricsServer != nil {
+		log.Println("easycron: stopping metrics server...")
+		metricsServer.Close()
+		log.Println("easycron: metrics server stopped")
+	}
 
 	log.Println("easycron: stopped")
 	return exitSuccess

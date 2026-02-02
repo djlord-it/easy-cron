@@ -42,6 +42,16 @@ type AnalyticsSink interface {
 	Record(ctx context.Context, event domain.TriggerEvent, config domain.AnalyticsConfig)
 }
 
+// MetricsSink defines the interface for recording dispatcher metrics.
+// All methods must be non-blocking and fire-and-forget.
+type MetricsSink interface {
+	DeliveryAttemptCompleted(attempt int, statusClass string, duration time.Duration)
+	DeliveryOutcome(outcome string)
+	RetryAttempt(retryable bool)
+	EventsInFlightIncr()
+	EventsInFlightDecr()
+}
+
 type WebhookRequest struct {
 	URL       string
 	Secret    string
@@ -81,6 +91,7 @@ type Dispatcher struct {
 	store     Store
 	sender    WebhookSender
 	analytics AnalyticsSink // optional, nil = disabled
+	metrics   MetricsSink   // optional, nil = disabled
 	backoff   []time.Duration
 }
 
@@ -94,6 +105,12 @@ func New(store Store, sender WebhookSender) *Dispatcher {
 
 func (d *Dispatcher) WithAnalytics(sink AnalyticsSink) *Dispatcher {
 	d.analytics = sink
+	return d
+}
+
+// WithMetrics attaches a metrics sink to the dispatcher.
+func (d *Dispatcher) WithMetrics(sink MetricsSink) *Dispatcher {
+	d.metrics = sink
 	return d
 }
 
@@ -151,6 +168,12 @@ func (d *Dispatcher) drain(ch <-chan domain.TriggerEvent) {
 }
 
 func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) error {
+	// Track in-flight events
+	if d.metrics != nil {
+		d.metrics.EventsInFlightIncr()
+		defer d.metrics.EventsInFlightDecr()
+	}
+
 	job, err := d.store.GetJobByID(ctx, event.JobID)
 	if err != nil {
 		return fmt.Errorf("get job: %w", err)
@@ -183,6 +206,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
+			// Record retry attempt metric
+			if d.metrics != nil {
+				d.metrics.RetryAttempt(lastResult.IsRetryable())
+			}
+
 			idx := attempt - 1
 			if idx >= len(d.backoff) {
 				idx = len(d.backoff) - 1
@@ -213,6 +241,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 		finishedAt := time.Now().UTC()
 		lastResult = result
 
+		// Record delivery attempt metrics
+		if d.metrics != nil {
+			statusClass := classifyStatusForMetrics(result.StatusCode, result.Error)
+			d.metrics.DeliveryAttemptCompleted(attempt, statusClass, result.Duration)
+		}
+
 		attemptRecord := domain.DeliveryAttempt{
 			ID:          attemptID,
 			ExecutionID: event.ExecutionID,
@@ -231,6 +265,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 
 		if result.IsSuccess() {
 			log.Printf("dispatcher: job=%s delivered attempt=%d", event.JobID, attempt)
+			if d.metrics != nil {
+				d.metrics.DeliveryOutcome("success")
+			}
 			if err := d.store.UpdateExecutionStatus(ctx, event.ExecutionID, domain.ExecutionStatusDelivered); err != nil {
 				if errors.Is(err, ErrStatusTransitionDenied) {
 					// Execution already in terminal state (likely reprocessing). Safe to ignore.
@@ -251,6 +288,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 	}
 
 	log.Printf("dispatcher: job=%s failed status=%d err=%v", event.JobID, lastResult.StatusCode, lastResult.Error)
+	if d.metrics != nil {
+		d.metrics.DeliveryOutcome("failed")
+	}
 	if err := d.store.UpdateExecutionStatus(ctx, event.ExecutionID, domain.ExecutionStatusFailed); err != nil {
 		if errors.Is(err, ErrStatusTransitionDenied) {
 			// Execution already in terminal state (likely reprocessing). Safe to ignore.
@@ -275,4 +315,66 @@ func (d *Dispatcher) writeAnalytics(ctx context.Context, event domain.TriggerEve
 		return
 	}
 	d.analytics.Record(ctx, event, job.Analytics)
+}
+
+// classifyStatusForMetrics maps an HTTP status code and error to a metrics status class.
+// Uses bounded cardinality: 2xx, 4xx, 5xx, timeout, connection_error, other_error.
+func classifyStatusForMetrics(statusCode int, err error) string {
+	if err != nil {
+		errStr := err.Error()
+		// Check for timeout errors
+		if containsInsensitive(errStr, "timeout") || containsInsensitive(errStr, "deadline exceeded") {
+			return "timeout"
+		}
+		// Check for connection errors
+		if containsInsensitive(errStr, "connection refused") ||
+			containsInsensitive(errStr, "no such host") ||
+			containsInsensitive(errStr, "network is unreachable") ||
+			containsInsensitive(errStr, "dial") {
+			return "connection_error"
+		}
+		return "other_error"
+	}
+
+	switch {
+	case statusCode >= 200 && statusCode < 300:
+		return "2xx"
+	case statusCode >= 400 && statusCode < 500:
+		return "4xx"
+	case statusCode >= 500:
+		return "5xx"
+	default:
+		return "other_error"
+	}
+}
+
+// containsInsensitive checks if substr is in s (case-insensitive).
+func containsInsensitive(s, substr string) bool {
+	if len(s) < len(substr) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		match := true
+		for j := 0; j < len(substr); j++ {
+			c1 := s[i+j]
+			c2 := substr[j]
+			if c1 != c2 {
+				// Convert to lowercase
+				if c1 >= 'A' && c1 <= 'Z' {
+					c1 += 32
+				}
+				if c2 >= 'A' && c2 <= 'Z' {
+					c2 += 32
+				}
+				if c1 != c2 {
+					match = false
+					break
+				}
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
