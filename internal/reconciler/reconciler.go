@@ -27,6 +27,12 @@ type EventEmitter interface {
 	Emit(ctx context.Context, event domain.TriggerEvent) error
 }
 
+// MetricsSink defines the interface for recording reconciler metrics.
+// All methods must be non-blocking and fire-and-forget.
+type MetricsSink interface {
+	OrphanedExecutionsUpdate(count int)
+}
+
 // Config holds reconciler configuration.
 type Config struct {
 	// Interval is how often the reconciler runs.
@@ -56,6 +62,7 @@ type Reconciler struct {
 	config  Config
 	store   Store
 	emitter EventEmitter
+	metrics MetricsSink // optional, nil = disabled
 	clock   func() time.Time
 }
 
@@ -67,6 +74,12 @@ func New(config Config, store Store, emitter EventEmitter) *Reconciler {
 		emitter: emitter,
 		clock:   time.Now,
 	}
+}
+
+// WithMetrics attaches a metrics sink to the reconciler.
+func (r *Reconciler) WithMetrics(sink MetricsSink) *Reconciler {
+	r.metrics = sink
+	return r
 }
 
 // Run starts the reconciliation loop. It blocks until ctx is cancelled.
@@ -101,6 +114,11 @@ func (r *Reconciler) runCycle(ctx context.Context) {
 		// DB error: log and abort cycle. Will retry next interval.
 		log.Printf("reconciler: failed to fetch orphans: %v", err)
 		return
+	}
+
+	// Report orphan count to metrics (even if zero)
+	if r.metrics != nil {
+		r.metrics.OrphanedExecutionsUpdate(len(orphans))
 	}
 
 	if len(orphans) == 0 {

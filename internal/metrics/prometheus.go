@@ -27,8 +27,14 @@ type PrometheusSink struct {
 	eventsInFlight        prometheus.Gauge
 
 	// EventBus metrics
-	bufferSize      prometheus.Gauge
-	emitErrorsTotal prometheus.Counter
+	bufferSize       prometheus.Gauge
+	bufferCapacity   prometheus.Gauge
+	bufferSaturation prometheus.Gauge
+	emitErrorsTotal  prometheus.Counter
+
+	// Observability metrics (C4)
+	orphanedExecutions prometheus.Gauge
+	executionLatency   prometheus.Histogram
 }
 
 // NewPrometheusSink creates a new Prometheus metrics sink.
@@ -112,13 +118,37 @@ func (s *PrometheusSink) initEventBusMetrics(reg prometheus.Registerer) {
 		Name: "easycron_eventbus_buffer_size",
 		Help: "Current number of events in the event bus buffer.",
 	})
+	s.bufferCapacity = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "easycron_eventbus_buffer_capacity",
+		Help: "Total capacity of the event bus buffer.",
+	})
+	s.bufferSaturation = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "easycron_eventbus_buffer_saturation",
+		Help: "Buffer saturation ratio (0.0-1.0). Above 0.8 indicates risk of event loss.",
+	})
 	s.emitErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "easycron_eventbus_emit_errors_total",
 		Help: "Total number of emit errors (buffer full).",
 	})
 
 	s.register(reg, s.bufferSize, "easycron_eventbus_buffer_size")
+	s.register(reg, s.bufferCapacity, "easycron_eventbus_buffer_capacity")
+	s.register(reg, s.bufferSaturation, "easycron_eventbus_buffer_saturation")
 	s.register(reg, s.emitErrorsTotal, "easycron_eventbus_emit_errors_total")
+
+	// Observability metrics (C4)
+	s.orphanedExecutions = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "easycron_orphaned_executions",
+		Help: "Current count of orphaned executions (status=emitted older than threshold).",
+	})
+	s.executionLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "easycron_execution_latency_seconds",
+		Help:    "End-to-end latency from scheduled_at to delivered (successful deliveries only).",
+		Buckets: []float64{1, 5, 10, 30, 60, 120, 300, 600, 1800},
+	})
+
+	s.register(reg, s.orphanedExecutions, "easycron_orphaned_executions")
+	s.register(reg, s.executionLatency, "easycron_execution_latency_seconds")
 }
 
 // register attempts to register a collector, logging any errors without propagating them.
@@ -184,6 +214,24 @@ func (s *PrometheusSink) BufferSizeUpdate(size int) {
 	s.bufferSize.Set(float64(size))
 }
 
+func (s *PrometheusSink) BufferCapacitySet(capacity int) {
+	s.bufferCapacity.Set(float64(capacity))
+}
+
+func (s *PrometheusSink) BufferSaturationUpdate(saturation float64) {
+	s.bufferSaturation.Set(saturation)
+}
+
 func (s *PrometheusSink) EmitError() {
 	s.emitErrorsTotal.Inc()
+}
+
+// Observability metrics implementation (C4)
+
+func (s *PrometheusSink) OrphanedExecutionsUpdate(count int) {
+	s.orphanedExecutions.Set(float64(count))
+}
+
+func (s *PrometheusSink) ExecutionLatencyObserve(latencySeconds float64) {
+	s.executionLatency.Observe(latencySeconds)
 }

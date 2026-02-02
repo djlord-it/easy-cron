@@ -28,6 +28,11 @@ type Store interface {
 	DeleteJob(ctx context.Context, jobID, projectID uuid.UUID) error
 }
 
+// HealthChecker provides database health status for the /health endpoint.
+type HealthChecker interface {
+	PingContext(ctx context.Context) error
+}
+
 type JobWithSchedule struct {
 	Job      domain.Job
 	Schedule domain.Schedule
@@ -36,10 +41,17 @@ type JobWithSchedule struct {
 type Handler struct {
 	store     Store
 	projectID uuid.UUID // single-tenant for now
+	db        HealthChecker
 }
 
 func NewHandler(store Store, projectID uuid.UUID) *Handler {
 	return &Handler{store: store, projectID: projectID}
+}
+
+// WithHealthChecker sets the database health checker for verbose /health responses.
+func (h *Handler) WithHealthChecker(db HealthChecker) *Handler {
+	h.db = db
+	return h
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -66,8 +78,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// HealthResponse represents the /health endpoint response.
+type HealthResponse struct {
+	Status     string            `json:"status"`
+	Components map[string]string `json:"components,omitempty"`
+}
+
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// Check if verbose mode requested via ?verbose=true
+	verbose := r.URL.Query().Get("verbose") == "true"
+
+	if !verbose || h.db == nil {
+		// Simple health check - just return ok
+		writeJSON(w, http.StatusOK, HealthResponse{Status: "ok"})
+		return
+	}
+
+	// Verbose health check - check all components
+	resp := HealthResponse{
+		Status:     "ok",
+		Components: make(map[string]string),
+	}
+
+	// Check database connectivity with timeout
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	if err := h.db.PingContext(ctx); err != nil {
+		resp.Status = "degraded"
+		resp.Components["database"] = "unhealthy: " + err.Error()
+	} else {
+		resp.Components["database"] = "healthy"
+	}
+
+	// Return appropriate status code based on health
+	statusCode := http.StatusOK
+	if resp.Status == "degraded" {
+		statusCode = http.StatusServiceUnavailable
+	}
+
+	writeJSON(w, statusCode, resp)
 }
 
 // maxRequestBodySize is the maximum allowed request body size (1MB).

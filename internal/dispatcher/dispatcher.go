@@ -50,6 +50,7 @@ type MetricsSink interface {
 	RetryAttempt(retryable bool)
 	EventsInFlightIncr()
 	EventsInFlightDecr()
+	ExecutionLatencyObserve(latencySeconds float64)
 }
 
 type WebhookRequest struct {
@@ -276,6 +277,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 			log.Printf("dispatcher: job=%s delivered attempt=%d", event.JobID, attempt)
 			if d.metrics != nil {
 				d.metrics.DeliveryOutcome("success")
+				// Record end-to-end latency: scheduled_at → delivered
+				latency := time.Since(event.ScheduledAt).Seconds()
+				d.metrics.ExecutionLatencyObserve(latency)
 			}
 			if err := d.store.UpdateExecutionStatus(ctx, event.ExecutionID, domain.ExecutionStatusDelivered); err != nil {
 				if errors.Is(err, ErrStatusTransitionDenied) {

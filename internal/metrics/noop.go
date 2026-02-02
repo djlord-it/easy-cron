@@ -20,4 +20,8 @@ func (n *NoopSink) RetryAttempt(retryable bool)                                 
 func (n *NoopSink) EventsInFlightIncr()                                                       {}
 func (n *NoopSink) EventsInFlightDecr()                                                       {}
 func (n *NoopSink) BufferSizeUpdate(size int)                                                 {}
+func (n *NoopSink) BufferCapacitySet(capacity int)                                            {}
+func (n *NoopSink) BufferSaturationUpdate(saturation float64)                                 {}
 func (n *NoopSink) EmitError()                                                                {}
+func (n *NoopSink) OrphanedExecutionsUpdate(count int)                                        {}
+func (n *NoopSink) ExecutionLatencyObserve(latencySeconds float64)                            {}

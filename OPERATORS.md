@@ -273,6 +273,143 @@ GET /health
 
 Returns `{"status":"ok"}` with HTTP 200 if the server is running.
 
+**Verbose health check:**
+```
+GET /health?verbose=true
+```
+
+Returns component-level health status:
+```json
+{
+  "status": "ok",
+  "components": {
+    "database": "healthy"
+  }
+}
+```
+
+When degraded:
+```json
+{
+  "status": "degraded",
+  "components": {
+    "database": "unhealthy: connection refused"
+  }
+}
+```
+
+| Status | HTTP Code | Meaning |
+|--------|-----------|---------|
+| `ok` | 200 | All components healthy |
+| `degraded` | 503 | One or more components unhealthy |
+
+### Prometheus Metrics
+
+Enable with `METRICS_ENABLED=true`. Metrics are exposed on a separate port (default 9090).
+
+#### Key Metrics & Alert Thresholds
+
+| Metric | Type | Alert Threshold | Meaning |
+|--------|------|-----------------|---------|
+| `easycron_eventbus_buffer_saturation` | Gauge (0.0-1.0) | **> 0.8** | Buffer nearing capacity, event loss imminent |
+| `easycron_eventbus_buffer_size` | Gauge | > 80 (of 100) | Same as above, absolute value |
+| `easycron_eventbus_emit_errors_total` | Counter | Any increase | Events were dropped (orphaned executions) |
+| `easycron_orphaned_executions` | Gauge | **> 0** | Orphaned executions detected by reconciler |
+| `easycron_execution_latency_seconds` | Histogram | **p99 > 60s** | Execution taking too long (scheduled_at → delivered) |
+| `easycron_dispatcher_events_in_flight` | Gauge | > 10 | Many concurrent webhook deliveries |
+| `easycron_dispatcher_delivery_outcomes_total{outcome="failed"}` | Counter | Sustained increase | Webhooks failing after all retries |
+| `easycron_scheduler_tick_errors_total` | Counter | Any increase | Scheduler tick errors (likely DB issues) |
+
+#### Recommended Alerts
+
+**Critical - Immediate Action Required:**
+```yaml
+# Buffer saturation critical - event loss happening
+- alert: EasyCronBufferCritical
+  expr: easycron_eventbus_buffer_saturation > 0.9
+  for: 1m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Event buffer nearly full, events being dropped"
+
+# Orphaned executions present
+- alert: EasyCronOrphanedExecutions
+  expr: easycron_orphaned_executions > 0
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "{{ $value }} orphaned executions detected"
+```
+
+**Warning - Investigate Soon:**
+```yaml
+# Buffer saturation warning
+- alert: EasyCronBufferWarning
+  expr: easycron_eventbus_buffer_saturation > 0.8
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Event buffer > 80% full"
+
+# High execution latency
+- alert: EasyCronHighLatency
+  expr: histogram_quantile(0.99, rate(easycron_execution_latency_seconds_bucket[5m])) > 120
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "p99 execution latency > 2 minutes"
+
+# Events dropped
+- alert: EasyCronEventsDropped
+  expr: increase(easycron_eventbus_emit_errors_total[5m]) > 0
+  labels:
+    severity: warning
+  annotations:
+    summary: "Events were dropped in the last 5 minutes"
+```
+
+#### Quick Diagnosis Queries
+
+**"Are we losing executions?"**
+```promql
+# Check for any event drops
+increase(easycron_eventbus_emit_errors_total[1h]) > 0
+
+# Check for orphans
+easycron_orphaned_executions > 0
+```
+
+**"Is the system saturated?"**
+```promql
+# Buffer saturation (1.0 = full)
+easycron_eventbus_buffer_saturation
+
+# Events waiting for delivery
+easycron_eventbus_buffer_size
+```
+
+**"How long are executions taking?"**
+```promql
+# p50, p90, p99 latency (scheduled_at → delivered)
+histogram_quantile(0.5, rate(easycron_execution_latency_seconds_bucket[5m]))
+histogram_quantile(0.9, rate(easycron_execution_latency_seconds_bucket[5m]))
+histogram_quantile(0.99, rate(easycron_execution_latency_seconds_bucket[5m]))
+```
+
+**"Are webhooks failing?"**
+```promql
+# Failed deliveries rate
+rate(easycron_dispatcher_delivery_outcomes_total{outcome="failed"}[5m])
+
+# Success rate
+sum(rate(easycron_dispatcher_delivery_outcomes_total{outcome="success"}[5m])) /
+sum(rate(easycron_dispatcher_delivery_outcomes_total[5m]))
+```
+
 ### Key Metrics (via logs)
 
 - `scheduler: emitted job=X` - Execution created and event sent

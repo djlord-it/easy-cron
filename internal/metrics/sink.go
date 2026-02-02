@@ -20,7 +20,13 @@ type Sink interface {
 
 	// EventBus metrics
 	BufferSizeUpdate(size int)
+	BufferCapacitySet(capacity int)
+	BufferSaturationUpdate(saturation float64)
 	EmitError()
+
+	// Observability metrics (C4)
+	OrphanedExecutionsUpdate(count int)
+	ExecutionLatencyObserve(latencySeconds float64)
 }
 
 // Outcome constants for DeliveryOutcome metric.

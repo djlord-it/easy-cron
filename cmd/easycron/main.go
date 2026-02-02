@@ -226,7 +226,7 @@ func runServe() int {
 	// Create API handler with the same store instance
 	// Using a fixed project ID for single-tenant mode
 	projectID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
-	apiHandler := api.NewHandler(store, projectID)
+	apiHandler := api.NewHandler(store, projectID).WithHealthChecker(db)
 
 	// Start HTTP server with API handler
 	httpServer := &http.Server{
@@ -275,6 +275,9 @@ func runServe() int {
 			store,
 			bus,
 		)
+		if metricsSink != nil {
+			recon = recon.WithMetrics(metricsSink)
+		}
 		reconcilerWg.Add(1)
 		go func() {
 			defer reconcilerWg.Done()
