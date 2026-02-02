@@ -13,9 +13,15 @@ import (
 
 // mockStore tracks executions and enforces idempotency.
 type mockStore struct {
-	mu         sync.Mutex
-	executions map[string]domain.Execution // key: job_id + scheduled_at
-	jobs       []JobWithSchedule
+	mu           sync.Mutex
+	executions   map[string]domain.Execution // key: job_id + scheduled_at
+	jobs         []JobWithSchedule
+	getJobsCalls []getJobsCall // tracks pagination calls
+}
+
+type getJobsCall struct {
+	limit  int
+	offset int
 }
 
 func newMockStore() *mockStore {
@@ -24,10 +30,20 @@ func newMockStore() *mockStore {
 	}
 }
 
-func (s *mockStore) GetEnabledJobs(ctx context.Context) ([]JobWithSchedule, error) {
+func (s *mockStore) GetEnabledJobs(ctx context.Context, limit, offset int) ([]JobWithSchedule, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.jobs, nil
+
+	s.getJobsCalls = append(s.getJobsCalls, getJobsCall{limit: limit, offset: offset})
+
+	if offset >= len(s.jobs) {
+		return nil, nil
+	}
+	end := offset + limit
+	if end > len(s.jobs) {
+		end = len(s.jobs)
+	}
+	return s.jobs[offset:end], nil
 }
 
 func (s *mockStore) InsertExecution(ctx context.Context, exec domain.Execution) error {
@@ -330,5 +346,84 @@ func TestScheduler_SameJobDifferentTimes(t *testing.T) {
 	// Should have 2 executions (same job, different times)
 	if store.executionCount() != 2 {
 		t.Errorf("expected 2 executions (different times), got %d", store.executionCount())
+	}
+}
+
+// TestScheduler_Pagination verifies that the scheduler paginates through
+// jobs in chunks rather than loading all at once.
+func TestScheduler_Pagination(t *testing.T) {
+	store := newMockStore()
+	emitter := &mockEmitter{}
+
+	projectID := uuid.New()
+	fireTime := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	// Add 250 jobs (more than DefaultJobPageSize of 100)
+	// This will require 3 pages: 100 + 100 + 50
+	numJobs := 250
+	for i := 0; i < numJobs; i++ {
+		jobID := uuid.New()
+		scheduleID := uuid.New()
+		store.addJob(
+			domain.Job{
+				ID:         jobID,
+				ProjectID:  projectID,
+				Name:       "test-job",
+				Enabled:    true,
+				ScheduleID: scheduleID,
+			},
+			domain.Schedule{
+				ID:             scheduleID,
+				CronExpression: "0 * * * *",
+				Timezone:       "UTC",
+			},
+		)
+	}
+
+	parser := &mockCronParser{fireTimes: []time.Time{fireTime}}
+
+	sched := New(
+		Config{TickInterval: time.Minute},
+		store,
+		parser,
+		emitter,
+	)
+
+	sched.clock = func() time.Time { return fireTime.Add(30 * time.Second) }
+	sched.lastTick = fireTime.Add(-time.Minute)
+
+	ctx := context.Background()
+	err := sched.processTick(ctx)
+	if err != nil {
+		t.Fatalf("processTick failed: %v", err)
+	}
+
+	// Verify pagination happened: should have 3 pages of calls
+	// Page 1: offset=0, Page 2: offset=100, Page 3: offset=200
+	store.mu.Lock()
+	calls := store.getJobsCalls
+	store.mu.Unlock()
+
+	if len(calls) != 3 {
+		t.Errorf("expected 3 pagination calls, got %d", len(calls))
+	}
+
+	// Verify offsets
+	expectedOffsets := []int{0, 100, 200}
+	for i, expected := range expectedOffsets {
+		if i >= len(calls) {
+			break
+		}
+		if calls[i].offset != expected {
+			t.Errorf("call %d: expected offset %d, got %d", i, expected, calls[i].offset)
+		}
+		if calls[i].limit != DefaultJobPageSize {
+			t.Errorf("call %d: expected limit %d, got %d", i, DefaultJobPageSize, calls[i].limit)
+		}
+	}
+
+	// Verify all jobs were processed
+	if store.executionCount() != numJobs {
+		t.Errorf("expected %d executions, got %d", numJobs, store.executionCount())
 	}
 }

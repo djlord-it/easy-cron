@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,10 +15,16 @@ import (
 	"github.com/djlord-it/easy-cron/internal/domain"
 )
 
+// Pagination defaults and limits.
+const (
+	DefaultLimit = 100
+	MaxLimit     = 1000
+)
+
 type Store interface {
 	CreateJob(ctx context.Context, job domain.Job, schedule domain.Schedule) error
-	ListJobs(ctx context.Context, projectID uuid.UUID) ([]JobWithSchedule, error)
-	ListExecutions(ctx context.Context, jobID uuid.UUID) ([]domain.Execution, error)
+	ListJobs(ctx context.Context, projectID uuid.UUID, limit, offset int) ([]JobWithSchedule, error)
+	ListExecutions(ctx context.Context, jobID uuid.UUID, limit, offset int) ([]domain.Execution, error)
 	DeleteJob(ctx context.Context, jobID, projectID uuid.UUID) error
 }
 
@@ -141,7 +148,13 @@ func (h *Handler) createJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listJobs(w http.ResponseWriter, r *http.Request) {
-	jobs, err := h.store.ListJobs(r.Context(), h.projectID)
+	limit, offset, err := parsePagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	jobs, err := h.store.ListJobs(r.Context(), h.projectID, limit, offset)
 	if err != nil {
 		log.Printf("api: list jobs error: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to list jobs")
@@ -180,7 +193,13 @@ func (h *Handler) listExecutions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	executions, err := h.store.ListExecutions(r.Context(), jobID)
+	limit, offset, err := parsePagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	executions, err := h.store.ListExecutions(r.Context(), jobID, limit, offset)
 	if err != nil {
 		log.Printf("api: list executions error: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to list executions")
@@ -252,4 +271,48 @@ func parseAnalyticsConfig(a *AnalyticsRequest) domain.AnalyticsConfig {
 		Enabled:          true,
 		RetentionSeconds: a.RetentionSeconds,
 	}
+}
+
+// parsePagination extracts and validates limit/offset query parameters.
+// Returns DefaultLimit if limit is not specified, and 0 for offset if not specified.
+// Returns an error if limit exceeds MaxLimit or if values are negative/invalid.
+func parsePagination(r *http.Request) (limit, offset int, err error) {
+	limit = DefaultLimit
+	offset = 0
+
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		limit, err = strconv.Atoi(limitStr)
+		if err != nil {
+			return 0, 0, err
+		}
+		if limit < 0 {
+			return 0, 0, strconv.ErrRange
+		}
+		if limit > MaxLimit {
+			return 0, 0, &limitExceededError{max: MaxLimit}
+		}
+		if limit == 0 {
+			limit = DefaultLimit
+		}
+	}
+
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		offset, err = strconv.Atoi(offsetStr)
+		if err != nil {
+			return 0, 0, err
+		}
+		if offset < 0 {
+			return 0, 0, strconv.ErrRange
+		}
+	}
+
+	return limit, offset, nil
+}
+
+type limitExceededError struct {
+	max int
+}
+
+func (e *limitExceededError) Error() string {
+	return "limit exceeds maximum of " + strconv.Itoa(e.max)
 }

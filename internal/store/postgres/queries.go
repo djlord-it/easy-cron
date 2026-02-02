@@ -10,6 +10,8 @@ SELECT
 FROM jobs j
 JOIN schedules s ON j.schedule_id = s.id
 WHERE j.enabled = true
+ORDER BY j.id
+LIMIT $1 OFFSET $2
 `
 
 const queryInsertExecution = `
@@ -64,6 +66,7 @@ FROM jobs j
 JOIN schedules s ON j.schedule_id = s.id
 WHERE j.project_id = $1
 ORDER BY j.created_at DESC
+LIMIT $2 OFFSET $3
 `
 
 const queryListExecutions = `
@@ -71,6 +74,7 @@ SELECT id, job_id, project_id, scheduled_at, fired_at, status, created_at
 FROM executions
 WHERE job_id = $1
 ORDER BY scheduled_at DESC
+LIMIT $2 OFFSET $3
 `
 
 const queryDeleteJob = `
