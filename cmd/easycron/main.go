@@ -223,11 +223,11 @@ func runServe() int {
 	// Use separate contexts for scheduler, dispatcher, and reconciler to enable ordered shutdown.
 	schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
 	dispatcherCtx, cancelDispatcher := context.WithCancel(context.Background())
-	reconcilerCtx, cancelReconciler := context.WithCancel(context.Background())
 
 	var schedulerWg sync.WaitGroup
 	var dispatcherWg sync.WaitGroup
 	var reconcilerWg sync.WaitGroup
+	var cancelReconciler context.CancelFunc
 
 	schedulerWg.Add(1)
 	go func() {
@@ -243,6 +243,8 @@ func runServe() int {
 
 	// Start reconciler if enabled
 	if cfg.ReconcileEnabled {
+		var reconcilerCtx context.Context
+		reconcilerCtx, cancelReconciler = context.WithCancel(context.Background())
 		recon := reconciler.New(
 			reconciler.Config{
 				Interval:  cfg.ReconcileInterval,
@@ -278,7 +280,7 @@ func runServe() int {
 	log.Println("easycron: scheduler stopped")
 
 	// Phase 2: Stop reconciler (no new re-emits)
-	if cfg.ReconcileEnabled {
+	if cancelReconciler != nil {
 		log.Println("easycron: stopping reconciler...")
 		cancelReconciler()
 		reconcilerWg.Wait()
