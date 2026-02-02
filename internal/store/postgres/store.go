@@ -15,16 +15,32 @@ import (
 
 // Store implements scheduler.Store and dispatcher.Store using PostgreSQL.
 type Store struct {
-	db *sql.DB
+	db        *sql.DB
+	opTimeout time.Duration
 }
 
 // New creates a new PostgreSQL store with the given database connection.
-func New(db *sql.DB) *Store {
-	return &Store{db: db}
+// opTimeout specifies the maximum duration for individual DB operations.
+// If opTimeout is 0, no timeout is applied (not recommended for production).
+func New(db *sql.DB, opTimeout time.Duration) *Store {
+	return &Store{db: db, opTimeout: opTimeout}
+}
+
+// withTimeout returns a context with the store's operation timeout applied.
+// If the parent context already has a deadline earlier than the timeout,
+// the parent's deadline is preserved. The returned cancel function must be called.
+func (s *Store) withTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	if s.opTimeout <= 0 {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, s.opTimeout)
 }
 
 // GetEnabledJobs returns enabled jobs with their schedules, paginated by limit and offset.
 func (s *Store) GetEnabledJobs(ctx context.Context, limit, offset int) ([]scheduler.JobWithSchedule, error) {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	rows, err := s.db.QueryContext(ctx, queryGetEnabledJobs, limit, offset)
 	if err != nil {
 		return nil, err
@@ -73,6 +89,9 @@ func (s *Store) GetEnabledJobs(ctx context.Context, limit, offset int) ([]schedu
 // InsertExecution inserts a new execution record.
 // Returns scheduler.ErrDuplicateExecution if (job_id, scheduled_at) already exists.
 func (s *Store) InsertExecution(ctx context.Context, exec domain.Execution) error {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	_, err := s.db.ExecContext(ctx, queryInsertExecution,
 		exec.ID,
 		exec.JobID,
@@ -93,6 +112,9 @@ func (s *Store) InsertExecution(ctx context.Context, exec domain.Execution) erro
 
 // GetJobByID returns a job by its ID.
 func (s *Store) GetJobByID(ctx context.Context, jobID uuid.UUID) (domain.Job, error) {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	var job domain.Job
 	var timeoutMs int64
 
@@ -120,6 +142,9 @@ func (s *Store) GetJobByID(ctx context.Context, jobID uuid.UUID) (domain.Job, er
 
 // InsertDeliveryAttempt inserts a new delivery attempt record.
 func (s *Store) InsertDeliveryAttempt(ctx context.Context, attempt domain.DeliveryAttempt) error {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	_, err := s.db.ExecContext(ctx, queryInsertDeliveryAttempt,
 		attempt.ID,
 		attempt.ExecutionID,
@@ -136,6 +161,9 @@ func (s *Store) InsertDeliveryAttempt(ctx context.Context, attempt domain.Delive
 // Returns dispatcher.ErrStatusTransitionDenied if the execution is already in a terminal state.
 // This uses an atomic UPDATE with WHERE clause to prevent TOCTOU race conditions.
 func (s *Store) UpdateExecutionStatus(ctx context.Context, executionID uuid.UUID, status domain.ExecutionStatus) error {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	// Single atomic update with guard in WHERE clause.
 	// PostgreSQL acquires row lock before evaluating WHERE,
 	// ensuring serialized access under concurrency.
@@ -193,6 +221,9 @@ func searchString(s, substr string) bool {
 
 // CreateJob creates a new job with its schedule in a transaction.
 func (s *Store) CreateJob(ctx context.Context, job domain.Job, schedule domain.Schedule) error {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -234,6 +265,9 @@ func (s *Store) CreateJob(ctx context.Context, job domain.Job, schedule domain.S
 
 // ListJobs returns jobs for a project with their schedules, paginated by limit and offset.
 func (s *Store) ListJobs(ctx context.Context, projectID uuid.UUID, limit, offset int) ([]api.JobWithSchedule, error) {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	rows, err := s.db.QueryContext(ctx, queryListJobs, projectID, limit, offset)
 	if err != nil {
 		return nil, err
@@ -281,6 +315,9 @@ func (s *Store) ListJobs(ctx context.Context, projectID uuid.UUID, limit, offset
 
 // ListExecutions returns executions for a job, paginated by limit and offset.
 func (s *Store) ListExecutions(ctx context.Context, jobID uuid.UUID, limit, offset int) ([]domain.Execution, error) {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	rows, err := s.db.QueryContext(ctx, queryListExecutions, jobID, limit, offset)
 	if err != nil {
 		return nil, err
@@ -316,6 +353,9 @@ func (s *Store) ListExecutions(ctx context.Context, jobID uuid.UUID, limit, offs
 }
 
 func (s *Store) DeleteJob(ctx context.Context, jobID, projectID uuid.UUID) error {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	var deletedID uuid.UUID
 	err := s.db.QueryRowContext(ctx, queryDeleteJob, jobID, projectID).Scan(&deletedID)
 	if err != nil {
@@ -331,6 +371,9 @@ func (s *Store) DeleteJob(ctx context.Context, jobID, projectID uuid.UUID) error
 // and were created before the given threshold time.
 // Results are ordered by created_at ASC (oldest first) and limited to maxResults.
 func (s *Store) GetOrphanedExecutions(ctx context.Context, olderThan time.Time, maxResults int) ([]domain.Execution, error) {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	rows, err := s.db.QueryContext(ctx, queryGetOrphanedExecutions, olderThan, maxResults)
 	if err != nil {
 		return nil, err

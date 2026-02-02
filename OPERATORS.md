@@ -2,6 +2,29 @@
 
 This document defines the operational contract for EasyCron. It describes what the system guarantees, what it does not guarantee, and how it behaves under failure.
 
+## Runtime Configuration
+
+### Timeouts & Pooling
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_OP_TIMEOUT` | `5s` | Maximum time for any single database operation |
+| `DB_MAX_OPEN_CONNS` | `25` | Maximum open connections to PostgreSQL |
+| `DB_MAX_IDLE_CONNS` | `5` | Maximum idle connections in the pool |
+| `DB_CONN_MAX_LIFETIME` | `30m` | Maximum lifetime of a connection |
+| `DB_CONN_MAX_IDLE_TIME` | `5m` | Maximum idle time before connection is closed |
+| `HTTP_SHUTDOWN_TIMEOUT` | `10s` | Time to wait for in-flight HTTP requests during shutdown |
+| `DISPATCHER_DRAIN_TIMEOUT` | `30s` | Time to wait for buffered events during shutdown |
+
+### Why These Defaults
+
+- **DB_OP_TIMEOUT=5s**: Prevents indefinite hangs during DB outages. Most operations complete in <100ms.
+- **DB_MAX_OPEN_CONNS=25**: Conservative limit for a single-node service. Prevents connection exhaustion.
+- **DB_MAX_IDLE_CONNS=5**: Keeps some connections warm without wasting resources.
+- **DB_CONN_MAX_LIFETIME=30m**: Ensures connections are recycled, respecting load balancer/proxy limits.
+- **HTTP_SHUTDOWN_TIMEOUT=10s**: Gives in-flight API requests time to complete gracefully.
+- **DISPATCHER_DRAIN_TIMEOUT=30s**: Allows pending webhook deliveries to complete during shutdown.
+
 ## Guarantees
 
 ### Execution Idempotency
@@ -29,9 +52,12 @@ After 4 failed attempts, the execution is marked `failed`. No further retries oc
 On SIGINT or SIGTERM:
 1. Scheduler stops immediately (no new executions emitted)
 2. Reconciler stops (if enabled, no new re-emits)
-3. Dispatcher drains buffered events (up to 30 seconds)
-4. HTTP server closes
-5. Process exits with code 0
+3. Dispatcher drains buffered events (bounded by `DISPATCHER_DRAIN_TIMEOUT`, default 30s)
+4. HTTP server gracefully shuts down (bounded by `HTTP_SHUTDOWN_TIMEOUT`, default 10s)
+5. Metrics server gracefully shuts down (if enabled)
+6. Process exits with code 0
+
+**Shutdown cannot hang indefinitely.** All phases have bounded timeouts.
 
 ## Non-Guarantees
 
@@ -58,9 +84,11 @@ Redis analytics may undercount executions if Redis is unavailable. Analytics fai
 | Phase | Behavior |
 |-------|----------|
 | Startup | Server refuses to start (exit code 1) |
-| Runtime (scheduler) | Tick fails, logged, retried next tick |
-| Runtime (dispatcher) | Job fetch fails, event logged, not retried |
-| Runtime (API) | Request fails with HTTP 500 |
+| Runtime (scheduler) | Tick fails after `DB_OP_TIMEOUT`, logged, retried next tick |
+| Runtime (dispatcher) | Job fetch fails after `DB_OP_TIMEOUT`, event logged, not retried |
+| Runtime (API) | Request fails with HTTP 500 after `DB_OP_TIMEOUT` |
+
+**DB operations cannot hang indefinitely.** All queries are bounded by `DB_OP_TIMEOUT` (default 5s).
 
 ### Redis Unavailable
 
@@ -99,15 +127,21 @@ Redis analytics may undercount executions if Redis is unavailable. Analytics fai
 4. Reconciler context cancelled (if enabled)
 5. Reconciler goroutine exits (immediate)
 6. Dispatcher context cancelled
-7. Dispatcher drains buffered events (max 30s)
+7. Dispatcher drains buffered events (max DISPATCHER_DRAIN_TIMEOUT, default 30s)
 8. Dispatcher goroutine exits
-9. HTTP server closed
-10. Process exits (code 0)
+9. HTTP server graceful shutdown (max HTTP_SHUTDOWN_TIMEOUT, default 10s)
+10. Metrics server graceful shutdown (if enabled)
+11. Process exits (code 0)
 ```
 
-### Drain Timeout
+### Bounded Timeouts
 
-The dispatcher has 30 seconds to process remaining buffered events. Events still in the buffer after timeout are lost.
+| Phase | Timeout | What Happens on Timeout |
+|-------|---------|------------------------|
+| Dispatcher drain | `DISPATCHER_DRAIN_TIMEOUT` | Remaining events logged and abandoned |
+| HTTP shutdown | `HTTP_SHUTDOWN_TIMEOUT` | Remaining connections forcibly closed |
+
+**Total maximum shutdown time:** `DISPATCHER_DRAIN_TIMEOUT` + `HTTP_SHUTDOWN_TIMEOUT` (default 40s)
 
 ### What May Be Lost
 
@@ -277,7 +311,17 @@ eventbus: buffer full, event dropped execution=<uuid> job=<uuid>
 scheduler: ORPHAN execution=<uuid> job=<uuid> scheduled_at=<time> emit failed: event buffer full
 ```
 
-### Connection Pooling
+### Database Connection Pool
+
+| Setting | Default | Environment Variable |
+|---------|---------|---------------------|
+| Max open connections | 25 | `DB_MAX_OPEN_CONNS` |
+| Max idle connections | 5 | `DB_MAX_IDLE_CONNS` |
+| Connection max lifetime | 30m | `DB_CONN_MAX_LIFETIME` |
+| Connection max idle time | 5m | `DB_CONN_MAX_IDLE_TIME` |
+| Operation timeout | 5s | `DB_OP_TIMEOUT` |
+
+### HTTP Client (Webhook Delivery)
 
 | Limit | Value |
 |-------|-------|

@@ -105,17 +105,28 @@ Commands:
   version    Print version information
 
 Environment Variables:
-  DATABASE_URL          PostgreSQL connection string (required)
-  REDIS_ADDR            Redis address for analytics (optional)
-  HTTP_ADDR             HTTP server address (default: ":8080")
-  TICK_INTERVAL         Scheduler tick interval (default: "30s")
-  METRICS_ENABLED       Enable Prometheus metrics (default: "false")
-  METRICS_PATH          Metrics endpoint path (default: "/metrics")
-  METRICS_PORT          Metrics server port (default: "9090")
-  RECONCILE_ENABLED     Enable orphan execution reconciler (default: "false")
-  RECONCILE_INTERVAL    How often to scan for orphans (default: "5m")
-  RECONCILE_THRESHOLD   Age before execution is orphaned (default: "10m")
-  RECONCILE_BATCH_SIZE  Max orphans per cycle (default: "100")`)
+  DATABASE_URL              PostgreSQL connection string (required)
+  REDIS_ADDR                Redis address for analytics (optional)
+  HTTP_ADDR                 HTTP server address (default: ":8080")
+  TICK_INTERVAL             Scheduler tick interval (default: "30s")
+
+  DB_OP_TIMEOUT             Database operation timeout (default: "5s")
+  DB_MAX_OPEN_CONNS         Max open database connections (default: "25")
+  DB_MAX_IDLE_CONNS         Max idle database connections (default: "5")
+  DB_CONN_MAX_LIFETIME      Max connection lifetime (default: "30m")
+  DB_CONN_MAX_IDLE_TIME     Max connection idle time (default: "5m")
+
+  HTTP_SHUTDOWN_TIMEOUT     Graceful HTTP shutdown timeout (default: "10s")
+  DISPATCHER_DRAIN_TIMEOUT  Dispatcher event drain timeout (default: "30s")
+
+  METRICS_ENABLED           Enable Prometheus metrics (default: "false")
+  METRICS_PATH              Metrics endpoint path (default: "/metrics")
+  METRICS_PORT              Metrics server port (default: "9090")
+
+  RECONCILE_ENABLED         Enable orphan execution reconciler (default: "false")
+  RECONCILE_INTERVAL        How often to scan for orphans (default: "5m")
+  RECONCILE_THRESHOLD       Age before execution is orphaned (default: "10m")
+  RECONCILE_BATCH_SIZE      Max orphans per cycle (default: "100")`)
 }
 
 func runServe() int {
@@ -134,12 +145,21 @@ func runServe() int {
 	}
 	defer db.Close()
 
+	// Configure connection pool
+	db.SetMaxOpenConns(cfg.DBMaxOpenConns)
+	db.SetMaxIdleConns(cfg.DBMaxIdleConns)
+	db.SetConnMaxLifetime(cfg.DBConnMaxLifetime)
+	db.SetConnMaxIdleTime(cfg.DBConnMaxIdleTime)
+
+	log.Printf("easycron: db pool configured (max_open=%d, max_idle=%d, max_lifetime=%s, max_idle_time=%s)",
+		cfg.DBMaxOpenConns, cfg.DBMaxIdleConns, cfg.DBConnMaxLifetime, cfg.DBConnMaxIdleTime)
+
 	if err := db.Ping(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to connect to database: %v\n", err)
 		return exitRuntimeError
 	}
 
-	store := postgres.New(db)
+	store := postgres.New(db, cfg.DBOpTimeout)
 	cronParser := &cronParserAdapter{parser: cron.NewParser()}
 	webhookSender := dispatcher.NewHTTPWebhookSender()
 
@@ -185,7 +205,8 @@ func runServe() int {
 		sched = sched.WithMetrics(metricsSink)
 	}
 
-	disp := dispatcher.New(store, webhookSender)
+	disp := dispatcher.New(store, webhookSender).
+		WithDrainTimeout(cfg.DispatcherDrainTimeout)
 	if metricsSink != nil {
 		disp = disp.WithMetrics(metricsSink)
 	}
@@ -293,15 +314,23 @@ func runServe() int {
 	dispatcherWg.Wait()
 	log.Println("easycron: dispatcher stopped")
 
-	// Phase 4: Stop HTTP server
+	// Phase 4: Stop HTTP server with graceful shutdown
 	log.Println("easycron: stopping http server...")
-	httpServer.Close()
+	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), cfg.HTTPShutdownTimeout)
+	defer httpShutdownCancel()
+	if err := httpServer.Shutdown(httpShutdownCtx); err != nil {
+		log.Printf("easycron: http server shutdown error: %v", err)
+	}
 	log.Println("easycron: http server stopped")
 
-	// Phase 5: Stop metrics server if running
+	// Phase 5: Stop metrics server if running (with same timeout)
 	if metricsServer != nil {
 		log.Println("easycron: stopping metrics server...")
-		metricsServer.Close()
+		metricsShutdownCtx, metricsShutdownCancel := context.WithTimeout(context.Background(), cfg.HTTPShutdownTimeout)
+		defer metricsShutdownCancel()
+		if err := metricsServer.Shutdown(metricsShutdownCtx); err != nil {
+			log.Printf("easycron: metrics server shutdown error: %v", err)
+		}
 		log.Println("easycron: metrics server stopped")
 	}
 
