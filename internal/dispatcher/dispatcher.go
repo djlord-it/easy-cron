@@ -88,19 +88,30 @@ func (r WebhookResult) IsRetryable() bool {
 }
 
 type Dispatcher struct {
-	store     Store
-	sender    WebhookSender
-	analytics AnalyticsSink // optional, nil = disabled
-	metrics   MetricsSink   // optional, nil = disabled
-	backoff   []time.Duration
+	store        Store
+	sender       WebhookSender
+	analytics    AnalyticsSink // optional, nil = disabled
+	metrics      MetricsSink   // optional, nil = disabled
+	backoff      []time.Duration
+	drainTimeout time.Duration
 }
+
+// DefaultDrainTimeout is the default maximum time to wait for buffered events during shutdown.
+const DefaultDrainTimeout = 30 * time.Second
 
 func New(store Store, sender WebhookSender) *Dispatcher {
 	return &Dispatcher{
-		store:   store,
-		sender:  sender,
-		backoff: defaultBackoff,
+		store:        store,
+		sender:       sender,
+		backoff:      defaultBackoff,
+		drainTimeout: DefaultDrainTimeout,
 	}
+}
+
+// WithDrainTimeout sets the maximum time to wait for buffered events during shutdown.
+func (d *Dispatcher) WithDrainTimeout(timeout time.Duration) *Dispatcher {
+	d.drainTimeout = timeout
+	return d
 }
 
 func (d *Dispatcher) WithAnalytics(sink AnalyticsSink) *Dispatcher {
@@ -130,13 +141,11 @@ func (d *Dispatcher) Run(ctx context.Context, ch <-chan domain.TriggerEvent) {
 	}
 }
 
-// DrainTimeout is the maximum time to wait for buffered events during shutdown.
-const DrainTimeout = 30 * time.Second
-
 // drain processes remaining events in the channel buffer after shutdown signal.
 // Uses a background context since the main context is already cancelled.
+// The drain is bounded by the dispatcher's drainTimeout.
 func (d *Dispatcher) drain(ch <-chan domain.TriggerEvent) {
-	drainCtx, cancel := context.WithTimeout(context.Background(), DrainTimeout)
+	drainCtx, cancel := context.WithTimeout(context.Background(), d.drainTimeout)
 	defer cancel()
 
 	count := 0
