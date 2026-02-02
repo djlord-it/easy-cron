@@ -25,6 +25,30 @@ This document defines the operational contract for EasyCron. It describes what t
 - **HTTP_SHUTDOWN_TIMEOUT=10s**: Gives in-flight API requests time to complete gracefully.
 - **DISPATCHER_DRAIN_TIMEOUT=30s**: Allows pending webhook deliveries to complete during shutdown.
 
+## Required Production Flags
+
+The following flags are **mandatory** for production deployments:
+
+| Variable | Value | Why |
+|----------|-------|-----|
+| `RECONCILE_ENABLED` | `true` | Without this, orphaned executions are **permanently lost**. Default is `false`. |
+| `METRICS_ENABLED` | `true` | Required for observability and alerting on buffer saturation. |
+
+**WARNING:** Running with `RECONCILE_ENABLED=false` in production means:
+- Any execution orphaned by buffer full, crash, or shutdown is **never delivered**
+- No automatic recovery mechanism exists
+- You must manually detect and handle orphans via database queries
+
+## Do Not Use EasyCron If...
+
+EasyCron is not suitable for your use case if:
+
+1. **You require exactly-once delivery** — Webhooks may be delivered 0, 1, or 2+ times
+2. **You cannot tolerate any missed webhooks** — In-memory queue means events can be lost on crash
+3. **You need guaranteed delivery of high-frequency jobs** — Jobs firing >1000 times per tick interval will have fires **permanently lost** (not queued)
+4. **Your webhook handlers are not idempotent** — Duplicate deliveries will cause data corruption
+5. **You need cross-restart retry continuation** — Retry sequences are abandoned on restart
+
 ## Guarantees
 
 ### Execution Idempotency
@@ -57,7 +81,48 @@ On SIGINT or SIGTERM:
 5. Metrics server gracefully shuts down (if enabled)
 6. Process exits with code 0
 
-**Shutdown cannot hang indefinitely.** All phases have bounded timeouts.
+**Shutdown is bounded** for dispatcher, HTTP, and metrics servers. Scheduler and reconciler exit immediately on context cancellation (no draining).
+
+## Operator Contract
+
+This section defines the explicit contract between EasyCron and operators.
+
+### What EasyCron Guarantees
+
+1. **At-most-once execution creation** per `(job_id, scheduled_at)` — DB constraint prevents duplicates
+2. **At-most 4 webhook delivery attempts** — bounded retries, no infinite loops
+3. **Terminal state immutability** — once `delivered` or `failed`, status cannot change
+4. **Bounded DB operations** — all queries timeout after `DB_OP_TIMEOUT` (default 5s)
+5. **Ordered shutdown** — scheduler stops before dispatcher drains
+6. **Idempotent re-emits** — reconciler uses original execution ID
+
+### What EasyCron Does NOT Guarantee
+
+1. **Webhook delivery** — events may be lost before delivery (crash, buffer full)
+2. **Exactly-once delivery** — webhooks may be delivered 0, 1, or 2+ times
+3. **Retry continuation after restart** — incomplete retry sequences are abandoned
+4. **Recovery without reconciler** — orphans are permanent if `RECONCILE_ENABLED=false`
+5. **Delivery of high-frequency fires** — >1000 fires per job per tick are permanently lost
+6. **Event persistence** — in-memory buffer (100 events) is lost on crash
+
+### What Operators MUST Do
+
+1. **Enable reconciler in production** — set `RECONCILE_ENABLED=true`
+2. **Design idempotent webhook handlers** — duplicate deliveries will occur
+3. **Monitor buffer saturation** — alert on `easycron_eventbus_buffer_saturation > 0.8`
+4. **Monitor orphan count** — alert on `easycron_orphaned_executions > 0`
+5. **Keep job frequency reasonable** — <1000 fires per job per tick interval
+6. **Ensure webhook endpoints respond within timeout** — slow endpoints cause backpressure
+
+### What Will Break the System
+
+| Action | Consequence |
+|--------|-------------|
+| Running `RECONCILE_ENABLED=false` in production | Orphaned executions are never recovered |
+| Creating jobs that fire >1000 times per tick | Fires beyond 1000 are permanently lost |
+| Webhook endpoints that never respond | Buffer fills, events dropped |
+| Ignoring buffer saturation alerts | Events lost, orphaned executions |
+| Non-idempotent webhook handlers | Data corruption on duplicate delivery |
 
 ## Non-Guarantees
 
@@ -115,6 +180,59 @@ Redis analytics may undercount executions if Redis is unavailable. Analytics fai
 | Missing DATABASE_URL | 2 |
 | Invalid TICK_INTERVAL | 2 |
 | Invalid DATABASE_URL format | 1 (runtime) |
+
+## Failure Scenarios & Outcomes
+
+This section describes specific failure scenarios and their outcomes.
+
+### Event Loss Scenarios
+
+| Scenario | Outcome | Recoverable? |
+|----------|---------|--------------|
+| Process crash with events in buffer | Events lost | Only if `RECONCILE_ENABLED=true` AND execution was inserted to DB |
+| Buffer full (100 events) for >5s | New events dropped | Only if `RECONCILE_ENABLED=true` |
+| Crash during retry backoff | Retry sequence abandoned | No — execution stays in last known state |
+| Job fires >1000 times in one tick | Fires beyond 1000 **permanently lost** | No — not inserted to DB |
+| Shutdown during active webhook delivery | Delivery may complete or be abandoned | Depends on timing within drain timeout |
+| DB failure during status update | Status not updated, execution appears orphaned | Yes — reconciler will re-emit |
+
+### Execution Status State Machine
+
+Executions follow this state machine:
+
+```
+                  ┌─────────────────┐
+                  │                 │
+    [created] ──► │    emitted      │ ──► [delivered] (terminal)
+                  │                 │
+                  └────────┬────────┘
+                           │
+                           └──────────► [failed] (terminal)
+```
+
+**Status values:**
+| Status | Meaning | Terminal? |
+|--------|---------|-----------|
+| `emitted` | Execution created, webhook delivery pending | No |
+| `delivered` | Webhook returned 2xx | Yes |
+| `failed` | All 4 retry attempts exhausted or non-retryable error | Yes |
+
+**Valid transitions:**
+- `emitted` → `delivered` (webhook returned 2xx)
+- `emitted` → `failed` (all 4 attempts exhausted or 4xx response)
+
+**Invalid transitions (blocked by DB query):**
+- `delivered` → any state
+- `failed` → any state
+
+### What the Reconciler Can and Cannot Do
+
+| Can Do | Cannot Do |
+|--------|-----------|
+| Re-emit executions with `status='emitted'` | Recover executions with `status='delivered'` or `status='failed'` |
+| Detect orphans older than threshold | Recover executions lost before DB insert (e.g., >1000 fires/tick) |
+| Re-emit using original execution ID | Create new executions |
+| Process up to `RECONCILE_BATCH_SIZE` orphans per cycle | Guarantee delivery (still at-most-once) |
 
 ## Shutdown Semantics
 
@@ -187,12 +305,13 @@ eventbus: buffer full, event dropped ...
 
 **Database query:**
 ```sql
--- Find orphaned executions (emitted > 15 minutes ago, no delivery)
+-- Find orphaned executions (emitted > RECONCILE_THRESHOLD ago, no delivery)
+-- Default threshold is 10 minutes
 SELECT e.id, e.job_id, e.scheduled_at, e.created_at
 FROM executions e
 LEFT JOIN delivery_attempts d ON d.execution_id = e.id
 WHERE e.status = 'emitted'
-  AND e.created_at < NOW() - INTERVAL '15 minutes'
+  AND e.created_at < NOW() - INTERVAL '10 minutes'
   AND d.id IS NULL;
 ```
 
@@ -200,7 +319,7 @@ WHERE e.status = 'emitted'
 
 An execution is considered orphaned if:
 - Status is `emitted`
-- Created more than 15 minutes ago
+- Created more than `RECONCILE_THRESHOLD` ago (default: 10 minutes)
 - Has zero delivery attempts
 
 ### Automatic Recovery (Reconciler)
@@ -423,7 +542,7 @@ Check for stuck executions:
 ```sql
 SELECT * FROM executions 
 WHERE status = 'emitted' 
-AND created_at < NOW() - INTERVAL '15 minutes';
+AND created_at < NOW() - INTERVAL '10 minutes';
 ```
 
 Check delivery attempts for an execution:
@@ -471,7 +590,7 @@ scheduler: ORPHAN execution=<uuid> job=<uuid> scheduled_at=<time> emit failed: e
 
 | Limit | Value | What Happens When Exceeded |
 |-------|-------|---------------------------|
-| Fire times per job per tick | 1000 | Additional fires skipped silently |
+| Fire times per job per tick | 1000 (hardcoded) | Additional fires **permanently lost** (not inserted to DB) |
 | Tick interval | 30s default | Shorter = more DB load, still minute resolution |
 
 ### Webhook Limits
