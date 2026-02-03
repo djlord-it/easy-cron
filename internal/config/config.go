@@ -91,11 +91,6 @@ type Config struct {
 	// Environment variable: METRICS_PATH
 	MetricsPath string `json:"metrics_path"`
 
-	// MetricsPort is the port for the metrics HTTP server.
-	// Default: "9090"
-	// Environment variable: METRICS_PORT
-	MetricsPort string `json:"metrics_port"`
-
 	// ReconcileEnabled enables the orphan execution reconciler.
 	// Default: false
 	// Environment variable: RECONCILE_ENABLED
@@ -138,7 +133,6 @@ func Load() Config {
 		DispatcherDrainTimeoutStr: os.Getenv("DISPATCHER_DRAIN_TIMEOUT"),
 		MetricsEnabled:            os.Getenv("METRICS_ENABLED") == "true",
 		MetricsPath:               os.Getenv("METRICS_PATH"),
-		MetricsPort:               os.Getenv("METRICS_PORT"),
 		ReconcileEnabled:          os.Getenv("RECONCILE_ENABLED") == "true",
 		ReconcileIntervalStr:      os.Getenv("RECONCILE_INTERVAL"),
 		ReconcileThresholdStr:     os.Getenv("RECONCILE_THRESHOLD"),
@@ -202,9 +196,6 @@ func Load() Config {
 	}
 	if cfg.MetricsPath == "" {
 		cfg.MetricsPath = "/metrics"
-	}
-	if cfg.MetricsPort == "" {
-		cfg.MetricsPort = "9090"
 	}
 	if cfg.ReconcileIntervalStr == "" {
 		cfg.ReconcileIntervalStr = "5m"
@@ -270,7 +261,6 @@ func (c Config) MaskedJSON() ([]byte, error) {
 		DispatcherDrainTimeout string `json:"dispatcher_drain_timeout"`
 		MetricsEnabled         bool   `json:"metrics_enabled"`
 		MetricsPath            string `json:"metrics_path"`
-		MetricsPort            string `json:"metrics_port"`
 		ReconcileEnabled       bool   `json:"reconcile_enabled"`
 		ReconcileInterval      string `json:"reconcile_interval"`
 		ReconcileThreshold     string `json:"reconcile_threshold"`
@@ -289,7 +279,6 @@ func (c Config) MaskedJSON() ([]byte, error) {
 		DispatcherDrainTimeout: c.DispatcherDrainTimeoutStr,
 		MetricsEnabled:         c.MetricsEnabled,
 		MetricsPath:            c.MetricsPath,
-		MetricsPort:            c.MetricsPort,
 		ReconcileEnabled:       c.ReconcileEnabled,
 		ReconcileInterval:      c.ReconcileIntervalStr,
 		ReconcileThreshold:     c.ReconcileThresholdStr,

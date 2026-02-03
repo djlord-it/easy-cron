@@ -121,7 +121,6 @@ Environment Variables:
 
   METRICS_ENABLED           Enable Prometheus metrics (default: "false")
   METRICS_PATH              Metrics endpoint path (default: "/metrics")
-  METRICS_PORT              Metrics server port (default: "9090")
 
   RECONCILE_ENABLED         Enable orphan execution reconciler (default: "false")
   RECONCILE_INTERVAL        How often to scan for orphans (default: "5m")
@@ -165,25 +164,10 @@ func runServe() int {
 
 	// Initialize metrics sink (optional)
 	var metricsSink *metrics.PrometheusSink
-	var metricsServer *http.Server
 
 	if cfg.MetricsEnabled {
 		metricsSink = metrics.NewPrometheusSink(prometheus.DefaultRegisterer)
-		log.Printf("easycron: metrics enabled (port=%s, path=%s)", cfg.MetricsPort, cfg.MetricsPath)
-
-		// Start metrics HTTP server on separate port
-		metricsMux := http.NewServeMux()
-		metricsMux.Handle(cfg.MetricsPath, promhttp.Handler())
-		metricsServer = &http.Server{
-			Addr:    ":" + cfg.MetricsPort,
-			Handler: metricsMux,
-		}
-		go func() {
-			log.Printf("easycron: metrics server listening on :%s", cfg.MetricsPort)
-			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("easycron: metrics server error: %v", err)
-			}
-		}()
+		log.Printf("easycron: metrics enabled (path=%s)", cfg.MetricsPath)
 	} else {
 		log.Println("easycron: METRICS_ENABLED not set; metrics disabled")
 	}
@@ -228,10 +212,17 @@ func runServe() int {
 	projectID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	apiHandler := api.NewHandler(store, projectID).WithHealthChecker(db)
 
-	// Start HTTP server with API handler
+	// Create HTTP mux combining API and optional metrics
+	httpMux := http.NewServeMux()
+	if cfg.MetricsEnabled {
+		httpMux.Handle(cfg.MetricsPath, promhttp.Handler())
+	}
+	httpMux.Handle("/", apiHandler)
+
+	// Start HTTP server
 	httpServer := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: apiHandler,
+		Handler: httpMux,
 	}
 
 	go func() {
@@ -325,17 +316,6 @@ func runServe() int {
 		log.Printf("easycron: http server shutdown error: %v", err)
 	}
 	log.Println("easycron: http server stopped")
-
-	// Phase 5: Stop metrics server if running (with same timeout)
-	if metricsServer != nil {
-		log.Println("easycron: stopping metrics server...")
-		metricsShutdownCtx, metricsShutdownCancel := context.WithTimeout(context.Background(), cfg.HTTPShutdownTimeout)
-		defer metricsShutdownCancel()
-		if err := metricsServer.Shutdown(metricsShutdownCtx); err != nil {
-			log.Printf("easycron: metrics server shutdown error: %v", err)
-		}
-		log.Println("easycron: metrics server stopped")
-	}
 
 	log.Println("easycron: stopped")
 	return exitSuccess
