@@ -1,0 +1,24 @@
+stages:
+  - test
+
+variables:
+  GOPATH: ${CI_PROJECT_DIR}/.go
+  GOFLAGS: -mod=readonly
+
+default:
+  image: golang:1.23-alpine
+  cache:
+    key: go-mod-${CI_COMMIT_REF_SLUG}
+    paths:
+      - .go/pkg/mod/
+
+test:
+  stage: test
+  before_script:
+    - go mod download
+  script:
+    - go build ./...
+    - go vet ./...
+    - go test -race -coverprofile=coverage.out ./...
+    - go tool cover -func=coverage.out | tail -1
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
