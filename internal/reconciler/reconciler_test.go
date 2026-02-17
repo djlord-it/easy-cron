@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/djlord-it/easy-cron/internal/dispatcher"
 	"github.com/djlord-it/easy-cron/internal/domain"
 )
 
@@ -445,10 +446,28 @@ func TestReconciler_DefaultConfig(t *testing.T) {
 	if cfg.Interval != 5*time.Minute {
 		t.Errorf("default interval should be 5m, got %s", cfg.Interval)
 	}
-	if cfg.Threshold != 10*time.Minute {
-		t.Errorf("default threshold should be 10m, got %s", cfg.Threshold)
+
+	// Threshold must exceed the dispatcher's maximum retry duration.
+	expectedThreshold := dispatcher.MaxRetryDuration() + SafetyMargin
+	if cfg.Threshold != expectedThreshold {
+		t.Errorf("default threshold should be %s, got %s", expectedThreshold, cfg.Threshold)
 	}
 	if cfg.BatchSize != 100 {
 		t.Errorf("default batch size should be 100, got %d", cfg.BatchSize)
+	}
+}
+
+// TestReconciler_ThresholdExceedsMaxRetryDuration is a safety invariant test.
+// It guarantees that the default reconciler threshold always exceeds the
+// dispatcher's worst-case retry window. If someone changes the dispatcher
+// backoff schedule, this test will fail, forcing them to verify the
+// reconciler threshold is still safe.
+func TestReconciler_ThresholdExceedsMaxRetryDuration(t *testing.T) {
+	cfg := DefaultConfig()
+	maxRetry := dispatcher.MaxRetryDuration()
+
+	if cfg.Threshold <= maxRetry {
+		t.Errorf("reconciler threshold (%s) must exceed dispatcher max retry duration (%s) "+
+			"to prevent duplicate webhook deliveries", cfg.Threshold, maxRetry)
 	}
 }

@@ -14,8 +14,13 @@ import (
 	"log"
 	"time"
 
+	"github.com/djlord-it/easy-cron/internal/dispatcher"
 	"github.com/djlord-it/easy-cron/internal/domain"
 )
+
+// SafetyMargin is the buffer added on top of the dispatcher's maximum retry
+// duration to account for processing overhead, clock drift, and DB latency.
+const SafetyMargin = 150 * time.Second
 
 // Store defines the interface for fetching orphaned executions.
 type Store interface {
@@ -49,10 +54,13 @@ type Config struct {
 }
 
 // DefaultConfig returns the default reconciler configuration.
+// The threshold is derived from the dispatcher's maximum retry duration plus
+// a safety margin, ensuring the reconciler never re-emits executions that are
+// still being actively retried.
 func DefaultConfig() Config {
 	return Config{
 		Interval:  5 * time.Minute,
-		Threshold: 10 * time.Minute,
+		Threshold: dispatcher.MaxRetryDuration() + SafetyMargin,
 		BatchSize: 100,
 	}
 }

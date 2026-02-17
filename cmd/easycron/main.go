@@ -119,6 +119,8 @@ Environment Variables:
   HTTP_SHUTDOWN_TIMEOUT     Graceful HTTP shutdown timeout (default: "10s")
   DISPATCHER_DRAIN_TIMEOUT  Dispatcher event drain timeout (default: "30s")
 
+  EVENTBUS_BUFFER_SIZE      Event bus channel buffer capacity (default: "100")
+
   METRICS_ENABLED           Enable Prometheus metrics (default: "false")
   METRICS_PATH              Metrics endpoint path (default: "/metrics")
 
@@ -177,7 +179,7 @@ func runServe() int {
 	if metricsSink != nil {
 		busOpts = append(busOpts, channel.WithMetrics(metricsSink))
 	}
-	bus := channel.NewEventBus(100, busOpts...)
+	bus := channel.NewEventBus(cfg.EventBusBufferSize, busOpts...)
 
 	sched := scheduler.New(
 		scheduler.Config{TickInterval: cfg.TickInterval},

@@ -115,6 +115,66 @@ func TestMaskedJSON_IncludesTimeoutConfig(t *testing.T) {
 	}
 }
 
+func TestLoad_EventBusBufferSizeDefault(t *testing.T) {
+	os.Unsetenv("EVENTBUS_BUFFER_SIZE")
+
+	cfg := Load()
+
+	if cfg.EventBusBufferSize != 100 {
+		t.Errorf("EventBusBufferSize: expected 100, got %d", cfg.EventBusBufferSize)
+	}
+}
+
+func TestLoad_EventBusBufferSizeCustom(t *testing.T) {
+	os.Setenv("EVENTBUS_BUFFER_SIZE", "500")
+	defer os.Unsetenv("EVENTBUS_BUFFER_SIZE")
+
+	cfg := Load()
+
+	if cfg.EventBusBufferSize != 500 {
+		t.Errorf("EventBusBufferSize: expected 500, got %d", cfg.EventBusBufferSize)
+	}
+}
+
+func TestLoad_EventBusBufferSizeInvalidFallsBack(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"negative", "-1"},
+		{"zero", "0"},
+		{"non-numeric", "abc"},
+		{"float", "1.5"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Setenv("EVENTBUS_BUFFER_SIZE", tt.value)
+			defer os.Unsetenv("EVENTBUS_BUFFER_SIZE")
+
+			cfg := Load()
+
+			if cfg.EventBusBufferSize != 100 {
+				t.Errorf("EventBusBufferSize: expected fallback to 100 for %q, got %d", tt.value, cfg.EventBusBufferSize)
+			}
+		})
+	}
+}
+
+func TestMaskedJSON_IncludesEventBusBufferSize(t *testing.T) {
+	os.Unsetenv("EVENTBUS_BUFFER_SIZE")
+
+	cfg := Load()
+	data, err := cfg.MaskedJSON()
+	if err != nil {
+		t.Fatalf("MaskedJSON failed: %v", err)
+	}
+
+	if !containsString(string(data), `"eventbus_buffer_size"`) {
+		t.Error("MaskedJSON missing eventbus_buffer_size field")
+	}
+}
+
 func containsString(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
