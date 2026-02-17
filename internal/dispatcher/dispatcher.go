@@ -21,6 +21,18 @@ var defaultBackoff = []time.Duration{
 
 const maxAttempts = 4
 
+// MaxRetryDuration returns the worst-case total time the dispatcher may spend
+// retrying a single execution (sum of all backoff intervals). Callers such as
+// the reconciler use this to avoid re-emitting executions that are still
+// in-flight.
+func MaxRetryDuration() time.Duration {
+	var total time.Duration
+	for _, d := range defaultBackoff {
+		total += d
+	}
+	return total
+}
+
 // ErrStatusTransitionDenied is returned when a status update would regress
 // from a terminal state (delivered/failed).
 var ErrStatusTransitionDenied = errors.New("status transition denied: execution already in terminal state")

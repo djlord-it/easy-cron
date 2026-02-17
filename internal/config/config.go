@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"time"
 )
@@ -105,7 +106,8 @@ type Config struct {
 	ReconcileIntervalStr string `json:"reconcile_interval"`
 
 	// ReconcileThreshold is the age after which an emitted execution is orphaned.
-	// Default: 10m
+	// Must exceed the dispatcher's maximum retry window (currently 12m30s).
+	// Default: 15m
 	// Environment variable: RECONCILE_THRESHOLD
 	ReconcileThreshold time.Duration `json:"-"`
 
@@ -116,6 +118,12 @@ type Config struct {
 	// Default: 100
 	// Environment variable: RECONCILE_BATCH_SIZE
 	ReconcileBatchSize int `json:"reconcile_batch_size"`
+
+	// EventBusBufferSize is the capacity of the in-memory event channel
+	// between the scheduler and dispatcher.
+	// Default: 100
+	// Environment variable: EVENTBUS_BUFFER_SIZE
+	EventBusBufferSize int `json:"eventbus_buffer_size"`
 }
 
 // Load reads configuration from environment variables.
@@ -146,6 +154,18 @@ func Load() Config {
 	}
 	if cfg.ReconcileBatchSize == 0 {
 		cfg.ReconcileBatchSize = 100
+	}
+
+	// Parse event bus buffer size (default 100)
+	if bufStr := os.Getenv("EVENTBUS_BUFFER_SIZE"); bufStr != "" {
+		if n, err := parseInt(bufStr); err == nil && n > 0 {
+			cfg.EventBusBufferSize = n
+		} else {
+			log.Printf("config: invalid EVENTBUS_BUFFER_SIZE %q (must be a positive integer), using default 100", bufStr)
+		}
+	}
+	if cfg.EventBusBufferSize == 0 {
+		cfg.EventBusBufferSize = 100
 	}
 
 	// Parse DB pool sizes
@@ -201,7 +221,7 @@ func Load() Config {
 		cfg.ReconcileIntervalStr = "5m"
 	}
 	if cfg.ReconcileThresholdStr == "" {
-		cfg.ReconcileThresholdStr = "10m"
+		cfg.ReconcileThresholdStr = "15m"
 	}
 
 	// Parse durations (validation happens separately)
@@ -265,6 +285,7 @@ func (c Config) MaskedJSON() ([]byte, error) {
 		ReconcileInterval      string `json:"reconcile_interval"`
 		ReconcileThreshold     string `json:"reconcile_threshold"`
 		ReconcileBatchSize     int    `json:"reconcile_batch_size"`
+		EventBusBufferSize     int    `json:"eventbus_buffer_size"`
 	}{
 		DatabaseURL:            maskSecret(c.DatabaseURL),
 		RedisAddr:              c.RedisAddr,
@@ -283,6 +304,7 @@ func (c Config) MaskedJSON() ([]byte, error) {
 		ReconcileInterval:      c.ReconcileIntervalStr,
 		ReconcileThreshold:     c.ReconcileThresholdStr,
 		ReconcileBatchSize:     c.ReconcileBatchSize,
+		EventBusBufferSize:     c.EventBusBufferSize,
 	}
 	return json.MarshalIndent(masked, "", "  ")
 }
