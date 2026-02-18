@@ -15,6 +15,8 @@ This document defines the operational contract for EasyCron. It describes what t
 | `DB_CONN_MAX_IDLE_TIME` | `5m` | Maximum idle time before connection is closed |
 | `HTTP_SHUTDOWN_TIMEOUT` | `10s` | Time to wait for in-flight HTTP requests during shutdown |
 | `DISPATCHER_DRAIN_TIMEOUT` | `30s` | Time to wait for buffered events during shutdown |
+| `CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive execution failures before circuit opens (0 = disabled) |
+| `CIRCUIT_BREAKER_COOLDOWN` | `2m` | Cooldown before allowing a probe attempt to an open circuit |
 
 ### Why These Defaults
 
@@ -24,6 +26,8 @@ This document defines the operational contract for EasyCron. It describes what t
 - **DB_CONN_MAX_LIFETIME=30m**: Ensures connections are recycled, respecting load balancer/proxy limits.
 - **HTTP_SHUTDOWN_TIMEOUT=10s**: Gives in-flight API requests time to complete gracefully.
 - **DISPATCHER_DRAIN_TIMEOUT=30s**: Allows pending webhook deliveries to complete during shutdown.
+- **CIRCUIT_BREAKER_THRESHOLD=5**: Opens circuit after 5 consecutive failed executions. Prevents wasting retry budget on endpoints that are consistently down. Set to 0 to disable.
+- **CIRCUIT_BREAKER_COOLDOWN=2m**: Gives failing endpoints time to recover before probing again. Short enough to resume delivery quickly once an endpoint recovers.
 
 ## Required Production Flags
 
@@ -70,6 +74,7 @@ After 4 failed attempts, the execution is marked `failed`. No further retries oc
 - Redis failures do not affect webhook delivery. Analytics is best-effort.
 - Individual job failures do not affect other jobs.
 - Webhook timeouts are bounded (default 30s, max 60s per job).
+- The circuit breaker is per-URL: a failing endpoint does not affect delivery to other URLs.
 
 ### Graceful Shutdown
 
@@ -104,6 +109,7 @@ This section defines the explicit contract between EasyCron and operators.
 4. **Recovery without reconciler** — orphans are permanent if `RECONCILE_ENABLED=false`
 5. **Delivery of high-frequency fires** — >1000 fires per job per tick are permanently lost
 6. **Event persistence** — in-memory buffer (100 events) is lost on crash
+7. **Circuit breaker persistence** — breaker state is in-memory, reset on restart
 
 ### What Operators MUST Do
 
@@ -120,7 +126,7 @@ This section defines the explicit contract between EasyCron and operators.
 |--------|-------------|
 | Running `RECONCILE_ENABLED=false` in production | Orphaned executions are never recovered |
 | Creating jobs that fire >1000 times per tick | Fires beyond 1000 are permanently lost |
-| Webhook endpoints that never respond | Buffer fills, events dropped |
+| Webhook endpoints that never respond | Circuit breaker opens, executions short-circuited to failed |
 | Ignoring buffer saturation alerts | Events lost, orphaned executions |
 | Non-idempotent webhook handlers | Data corruption on duplicate delivery |
 
@@ -141,6 +147,51 @@ If the process restarts during a retry sequence, remaining retries are abandoned
 ### Analytics Best-Effort
 
 Redis analytics may undercount executions if Redis is unavailable. Analytics failures are logged but never block delivery.
+
+## Circuit Breaker
+
+The dispatcher includes a per-URL circuit breaker that protects against repeatedly hitting failing webhook endpoints. This is in-memory only and resets on restart.
+
+### State Machine
+
+```
+CLOSED ──(N consecutive failed executions)──> OPEN
+OPEN   ──(cooldown elapsed)─────────────────> HALF_OPEN (one probe allowed)
+HALF_OPEN ──(probe succeeds)────────────────> CLOSED
+HALF_OPEN ──(probe fails)──────────────────> OPEN (cooldown resets)
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive failed executions before opening. 0 disables. |
+| `CIRCUIT_BREAKER_COOLDOWN` | `2m` | Time before allowing a probe attempt |
+
+### Behavior
+
+- The breaker counts consecutive fully-failed **executions** (not individual HTTP attempts). An execution that exhausts all 4 retry attempts counts as one failure.
+- When a circuit is open, executions are immediately marked `failed` without making HTTP calls. This is fast — no retry delays.
+- After the cooldown, exactly one probe execution is allowed through. If it succeeds (any attempt delivers), the circuit closes. If all attempts fail, the circuit re-opens with a fresh cooldown.
+- Each webhook URL has an independent circuit. One failing URL does not affect others.
+- The breaker is in-memory. On restart, all circuits reset to closed.
+
+### Interaction with Reconciler
+
+If the circuit is open and the reconciler re-emits an orphaned execution for that URL, the execution will be immediately failed by the circuit breaker. The reconciler has its own batch size limit, so this does not cause an infinite loop.
+
+### When to Disable
+
+Set `CIRCUIT_BREAKER_THRESHOLD=0` to disable. Consider disabling if:
+- You prefer every execution to attempt delivery regardless of endpoint health
+- You have very few jobs and want maximum delivery attempts
+
+### Log Signals
+
+```
+easycron: circuit breaker enabled (threshold=5, cooldown=2m0s)
+dispatcher: job=X circuit open for http://example.com/hook, skipping
+```
 
 ## Failure Modes
 
@@ -172,6 +223,7 @@ Redis analytics may undercount executions if Redis is unavailable. Analytics fai
 | HTTP 429 | Retryable, up to 4 attempts |
 | HTTP 4xx (not 429) | Non-retryable, marked failed immediately |
 | HTTP 2xx | Success, marked delivered |
+| Circuit open | Execution immediately marked failed, no HTTP call made |
 
 ### Invalid Configuration
 
@@ -280,6 +332,7 @@ Executions follow this state machine:
 - Events in the in-memory buffer at crash time
 - Incomplete retry sequences
 - Analytics writes that failed before crash
+- Circuit breaker state (all circuits reset to closed on restart)
 
 **WARNING:** The in-memory event buffer (100 events) is NOT persisted. Events in the buffer at crash or restart time are permanently lost.
 
@@ -437,6 +490,7 @@ Enable with `METRICS_ENABLED=true`. Metrics are exposed on a separate port (defa
 | `easycron_execution_latency_seconds` | Histogram | **p99 > 60s** | Execution taking too long (scheduled_at → delivered) |
 | `easycron_dispatcher_events_in_flight` | Gauge | > 10 | Many concurrent webhook deliveries |
 | `easycron_dispatcher_delivery_outcomes_total{outcome="failed"}` | Counter | Sustained increase | Webhooks failing after all retries |
+| `easycron_dispatcher_delivery_outcomes_total{outcome="circuit_open"}` | Counter | Sustained increase | Executions skipped due to open circuit breaker |
 | `easycron_scheduler_tick_errors_total` | Counter | Any increase | Scheduler tick errors (likely DB issues) |
 
 #### Recommended Alerts
@@ -489,6 +543,14 @@ Enable with `METRICS_ENABLED=true`. Metrics are exposed on a separate port (defa
     severity: warning
   annotations:
     summary: "Events were dropped in the last 5 minutes"
+
+# Circuit breaker open for a URL
+- alert: EasyCronCircuitBreakerOpen
+  expr: increase(easycron_dispatcher_delivery_outcomes_total{outcome="circuit_open"}[5m]) > 0
+  labels:
+    severity: warning
+  annotations:
+    summary: "Circuit breaker is open for one or more webhook URLs"
 ```
 
 #### Quick Diagnosis Queries
@@ -524,6 +586,9 @@ histogram_quantile(0.99, rate(easycron_execution_latency_seconds_bucket[5m]))
 # Failed deliveries rate
 rate(easycron_dispatcher_delivery_outcomes_total{outcome="failed"}[5m])
 
+# Circuit breaker activations
+rate(easycron_dispatcher_delivery_outcomes_total{outcome="circuit_open"}[5m])
+
 # Success rate
 sum(rate(easycron_dispatcher_delivery_outcomes_total{outcome="success"}[5m])) /
 sum(rate(easycron_dispatcher_delivery_outcomes_total[5m]))
@@ -534,6 +599,7 @@ sum(rate(easycron_dispatcher_delivery_outcomes_total[5m]))
 - `scheduler: emitted job=X` - Execution created and event sent
 - `dispatcher: job=X delivered attempt=N` - Successful delivery
 - `dispatcher: job=X failed` - All retries exhausted
+- `dispatcher: job=X circuit open for URL, skipping` - Circuit breaker blocked delivery
 - `analytics: redis error` - Analytics write failed
 
 ### Database Queries
