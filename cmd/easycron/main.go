@@ -18,6 +18,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/djlord-it/easy-cron/internal/analytics"
+	"github.com/djlord-it/easy-cron/internal/circuitbreaker"
 	"github.com/djlord-it/easy-cron/internal/api"
 	"github.com/djlord-it/easy-cron/internal/config"
 	"github.com/djlord-it/easy-cron/internal/cron"
@@ -121,6 +122,9 @@ Environment Variables:
 
   EVENTBUS_BUFFER_SIZE      Event bus channel buffer capacity (default: "100")
 
+  CIRCUIT_BREAKER_THRESHOLD Circuit breaker failure threshold (default: "5", 0=disabled)
+  CIRCUIT_BREAKER_COOLDOWN  Circuit breaker cooldown duration (default: "2m")
+
   METRICS_ENABLED           Enable Prometheus metrics (default: "false")
   METRICS_PATH              Metrics endpoint path (default: "/metrics")
 
@@ -207,6 +211,15 @@ func runServe() int {
 		log.Printf("easycron: analytics enabled (redis=%s)", cfg.RedisAddr)
 	} else {
 		log.Println("easycron: REDIS_ADDR not set; analytics disabled")
+	}
+
+	if cfg.CircuitBreakerThreshold > 0 {
+		cb := circuitbreaker.New(cfg.CircuitBreakerThreshold, cfg.CircuitBreakerCooldown)
+		disp = disp.WithCircuitBreaker(cb)
+		log.Printf("easycron: circuit breaker enabled (threshold=%d, cooldown=%s)",
+			cfg.CircuitBreakerThreshold, cfg.CircuitBreakerCooldown)
+	} else {
+		log.Println("easycron: circuit breaker disabled (threshold=0)")
 	}
 
 	// Create API handler with the same store instance
