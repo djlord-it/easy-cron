@@ -406,3 +406,215 @@ func TestDispatcher_MaxAttemptsConstant(t *testing.T) {
 		t.Errorf("maxAttempts must be 4, got %d", maxAttempts)
 	}
 }
+
+// mockCircuitBreaker implements CircuitBreaker for testing.
+type mockCircuitBreaker struct {
+	mu           sync.Mutex
+	allowErr     map[string]error
+	successCalls []string
+	failureCalls []string
+}
+
+func newMockCircuitBreaker() *mockCircuitBreaker {
+	return &mockCircuitBreaker{
+		allowErr: make(map[string]error),
+	}
+}
+
+func (m *mockCircuitBreaker) Allow(url string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.allowErr[url]
+}
+
+func (m *mockCircuitBreaker) RecordSuccess(url string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.successCalls = append(m.successCalls, url)
+}
+
+func (m *mockCircuitBreaker) RecordFailure(url string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failureCalls = append(m.failureCalls, url)
+}
+
+func (m *mockCircuitBreaker) setOpen(url string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.allowErr[url] = errors.New("circuit breaker is open")
+}
+
+func TestDispatch_CircuitOpen_SkipsRetryLoop(t *testing.T) {
+	store := newMockStore()
+	sender := &mockSender{results: []WebhookResult{}}
+	cb := newMockCircuitBreaker()
+
+	jobID := uuid.New()
+	execID := uuid.New()
+	webhookURL := "http://failing.example.com/hook"
+	store.addJob(domain.Job{
+		ID:        jobID,
+		ProjectID: uuid.New(),
+		Name:      "test-job",
+		Enabled:   true,
+		Delivery: domain.DeliveryConfig{
+			Type:       "webhook",
+			WebhookURL: webhookURL,
+			Timeout:    30 * time.Second,
+		},
+	})
+	cb.setOpen(webhookURL)
+
+	disp := New(store, sender).WithCircuitBreaker(cb)
+
+	event := domain.TriggerEvent{
+		JobID:       jobID,
+		ExecutionID: execID,
+		ScheduledAt: time.Now(),
+		FiredAt:     time.Now(),
+	}
+
+	err := disp.Dispatch(context.Background(), event)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	// Sender should NOT have been called
+	if sender.callCount() != 0 {
+		t.Errorf("expected 0 send calls, got %d", sender.callCount())
+	}
+
+	// Execution should be marked as failed
+	store.mu.Lock()
+	status := store.executionStatus[execID]
+	store.mu.Unlock()
+	if status != domain.ExecutionStatusFailed {
+		t.Errorf("expected status failed, got %v", status)
+	}
+}
+
+func TestDispatch_CircuitClosed_RecordsSuccess(t *testing.T) {
+	store := newMockStore()
+	sender := &mockSender{results: []WebhookResult{
+		{StatusCode: 200},
+	}}
+	cb := newMockCircuitBreaker()
+
+	jobID := uuid.New()
+	execID := uuid.New()
+	webhookURL := "http://ok.example.com/hook"
+	store.addJob(domain.Job{
+		ID:        jobID,
+		ProjectID: uuid.New(),
+		Name:      "test-job",
+		Enabled:   true,
+		Delivery: domain.DeliveryConfig{
+			Type:       "webhook",
+			WebhookURL: webhookURL,
+			Timeout:    30 * time.Second,
+		},
+	})
+
+	disp := New(store, sender).WithCircuitBreaker(cb)
+
+	event := domain.TriggerEvent{
+		JobID:       jobID,
+		ExecutionID: execID,
+		ScheduledAt: time.Now(),
+		FiredAt:     time.Now(),
+	}
+
+	err := disp.Dispatch(context.Background(), event)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if len(cb.successCalls) != 1 || cb.successCalls[0] != webhookURL {
+		t.Errorf("expected RecordSuccess(%q), got %v", webhookURL, cb.successCalls)
+	}
+}
+
+func TestDispatch_CircuitClosed_RecordsFailure(t *testing.T) {
+	store := newMockStore()
+	sender := &mockSender{results: []WebhookResult{
+		{StatusCode: 500, Error: errors.New("server error")},
+		{StatusCode: 500, Error: errors.New("server error")},
+		{StatusCode: 500, Error: errors.New("server error")},
+		{StatusCode: 500, Error: errors.New("server error")},
+	}}
+	cb := newMockCircuitBreaker()
+
+	jobID := uuid.New()
+	execID := uuid.New()
+	webhookURL := "http://fail.example.com/hook"
+	store.addJob(domain.Job{
+		ID:        jobID,
+		ProjectID: uuid.New(),
+		Name:      "test-job",
+		Enabled:   true,
+		Delivery: domain.DeliveryConfig{
+			Type:       "webhook",
+			WebhookURL: webhookURL,
+			Timeout:    30 * time.Second,
+		},
+	})
+
+	disp := New(store, sender).WithCircuitBreaker(cb)
+	disp.backoff = []time.Duration{0, 0, 0, 0}
+
+	event := domain.TriggerEvent{
+		JobID:       jobID,
+		ExecutionID: execID,
+		ScheduledAt: time.Now(),
+		FiredAt:     time.Now(),
+	}
+
+	err := disp.Dispatch(context.Background(), event)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if len(cb.failureCalls) != 1 || cb.failureCalls[0] != webhookURL {
+		t.Errorf("expected RecordFailure(%q), got %v", webhookURL, cb.failureCalls)
+	}
+}
+
+func TestDispatch_NilBreaker_Works(t *testing.T) {
+	store := newMockStore()
+	sender := &mockSender{results: []WebhookResult{
+		{StatusCode: 200},
+	}}
+
+	jobID := uuid.New()
+	execID := uuid.New()
+	store.addJob(domain.Job{
+		ID:        jobID,
+		ProjectID: uuid.New(),
+		Name:      "test-job",
+		Enabled:   true,
+		Delivery: domain.DeliveryConfig{
+			Type:       "webhook",
+			WebhookURL: "http://example.com/hook",
+			Timeout:    30 * time.Second,
+		},
+	})
+
+	disp := New(store, sender) // no WithCircuitBreaker
+
+	event := domain.TriggerEvent{
+		JobID:       jobID,
+		ExecutionID: execID,
+		ScheduledAt: time.Now(),
+		FiredAt:     time.Now(),
+	}
+
+	err := disp.Dispatch(context.Background(), event)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}

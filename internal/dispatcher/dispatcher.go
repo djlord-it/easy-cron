@@ -65,6 +65,13 @@ type MetricsSink interface {
 	ExecutionLatencyObserve(latencySeconds float64)
 }
 
+// CircuitBreaker controls whether dispatch attempts are allowed for a given URL.
+type CircuitBreaker interface {
+	Allow(url string) error
+	RecordSuccess(url string)
+	RecordFailure(url string)
+}
+
 type WebhookRequest struct {
 	URL       string
 	Secret    string
@@ -105,6 +112,7 @@ type Dispatcher struct {
 	sender       WebhookSender
 	analytics    AnalyticsSink // optional, nil = disabled
 	metrics      MetricsSink   // optional, nil = disabled
+	breaker      CircuitBreaker // optional, nil = disabled
 	backoff      []time.Duration
 	drainTimeout time.Duration
 }
@@ -135,6 +143,12 @@ func (d *Dispatcher) WithAnalytics(sink AnalyticsSink) *Dispatcher {
 // WithMetrics attaches a metrics sink to the dispatcher.
 func (d *Dispatcher) WithMetrics(sink MetricsSink) *Dispatcher {
 	d.metrics = sink
+	return d
+}
+
+// WithCircuitBreaker attaches a circuit breaker to the dispatcher.
+func (d *Dispatcher) WithCircuitBreaker(cb CircuitBreaker) *Dispatcher {
+	d.breaker = cb
 	return d
 }
 
@@ -208,6 +222,24 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 	if job.Delivery.WebhookURL == "" {
 		log.Printf("dispatcher: job=%s has no webhook URL configured", event.JobID)
 		return fmt.Errorf("job %s: no webhook URL", event.JobID)
+	}
+
+	// Circuit breaker: skip dispatch if circuit is open for this URL
+	if d.breaker != nil {
+		if err := d.breaker.Allow(job.Delivery.WebhookURL); err != nil {
+			log.Printf("dispatcher: job=%s circuit open for %s, skipping", event.JobID, job.Delivery.WebhookURL)
+			if d.metrics != nil {
+				d.metrics.DeliveryOutcome("circuit_open")
+			}
+			if err := d.store.UpdateExecutionStatus(ctx, event.ExecutionID, domain.ExecutionStatusFailed); err != nil {
+				if errors.Is(err, ErrStatusTransitionDenied) {
+					log.Printf("dispatcher: job=%s execution=%s already terminal, skipping status update", event.JobID, event.ExecutionID)
+					return nil
+				}
+				return err
+			}
+			return nil
+		}
 	}
 
 	payload := WebhookPayload{
@@ -301,6 +333,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 				}
 				return err
 			}
+			if d.breaker != nil {
+				d.breaker.RecordSuccess(job.Delivery.WebhookURL)
+			}
 			return nil
 		}
 
@@ -323,6 +358,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event domain.TriggerEvent) er
 			return nil
 		}
 		return err
+	}
+	if d.breaker != nil {
+		d.breaker.RecordFailure(job.Delivery.WebhookURL)
 	}
 	return nil
 }
