@@ -36,6 +36,7 @@ flowchart LR
     E --> F[Dispatcher]
     F -->|POST webhook| G[Your App]
     F -->|retry on failure| F
+    F -.->|circuit open| F
     H[Reconciler] -->|recover orphans| E
     C --> H
 ```
@@ -45,7 +46,8 @@ flowchart LR
 2. The **Scheduler** checks PostgreSQL every tick (default 30s) for jobs due to fire
 3. Fired executions are sent to an in-memory **Event Bus**
 4. The **Dispatcher** delivers webhooks with HMAC signatures and retries failures
-5. The optional **Reconciler** recovers executions that were lost (crash, buffer full)
+5. A per-URL **Circuit Breaker** skips dispatch to endpoints with repeated failures, re-probing after a cooldown
+6. The optional **Reconciler** recovers executions that were lost (crash, buffer full)
 
 ## Quick Start
 
@@ -119,6 +121,8 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `DATABASE_URL` | Yes | - | PostgreSQL connection string |
 | `HTTP_ADDR` | No | `:8080` | HTTP server listen address |
 | `TICK_INTERVAL` | No | `30s` | Scheduler polling interval |
+| `CIRCUIT_BREAKER_THRESHOLD` | No | `5` | Consecutive failures before circuit opens (0 = disabled) |
+| `CIRCUIT_BREAKER_COOLDOWN` | No | `2m` | Cooldown before allowing a probe attempt |
 | `REDIS_ADDR` | No | - | Redis address for analytics (optional) |
 
 ### Behavior
@@ -258,6 +262,12 @@ Retryable failures: 5xx responses, 429 (rate limit), network errors.
 Non-retryable: 4xx responses (except 429).
 
 After 4 failed attempts, the execution is marked as `failed`.
+
+#### Circuit Breaker
+
+If a webhook URL fails 5 consecutive executions (configurable via `CIRCUIT_BREAKER_THRESHOLD`), the dispatcher opens a circuit breaker for that URL. While open, new executions for that URL are immediately marked `failed` without making HTTP calls. After a cooldown period (`CIRCUIT_BREAKER_COOLDOWN`, default 2m), one probe attempt is allowed. If it succeeds, the circuit closes and normal delivery resumes. If it fails, the circuit re-opens.
+
+Set `CIRCUIT_BREAKER_THRESHOLD=0` to disable.
 
 ## Integration Modes
 
