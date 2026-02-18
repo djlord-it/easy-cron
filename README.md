@@ -49,6 +49,8 @@ flowchart LR
 5. A per-URL **Circuit Breaker** skips dispatch to endpoints with repeated failures, re-probing after a cooldown
 6. The optional **Reconciler** recovers executions that were lost (crash, buffer full)
 
+> **DB Dispatch Mode:** Set `DISPATCH_MODE=db` to have workers poll Postgres directly via `SELECT ... FOR UPDATE SKIP LOCKED` instead of using the in-memory Event Bus. This eliminates the channel as a single point of failure and supports multiple worker goroutines (`DISPATCHER_WORKERS`).
+
 ## Quick Start
 
 ### Option 1: Docker Compose (recommended)
@@ -72,6 +74,7 @@ go build -o easycron ./cmd/easycron
 ```bash
 createdb easycron
 psql easycron < schema/001_initial.sql
+psql easycron < schema/003_add_claimed_at.sql
 ```
 
 3. Run:
@@ -123,6 +126,9 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `TICK_INTERVAL` | No | `30s` | Scheduler polling interval |
 | `CIRCUIT_BREAKER_THRESHOLD` | No | `5` | Consecutive failures before circuit opens (0 = disabled) |
 | `CIRCUIT_BREAKER_COOLDOWN` | No | `2m` | Cooldown before allowing a probe attempt |
+| `DISPATCH_MODE` | No | `channel` | Dispatch mode: `channel` (in-memory) or `db` (Postgres polling) |
+| `DB_POLL_INTERVAL` | No | `500ms` | Sleep between DB polls when idle (DB mode only) |
+| `DISPATCHER_WORKERS` | No | `1` | Concurrent dispatch workers (DB mode only) |
 | `REDIS_ADDR` | No | - | Redis address for analytics (optional) |
 
 ### Behavior
