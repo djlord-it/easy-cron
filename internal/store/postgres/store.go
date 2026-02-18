@@ -408,6 +408,75 @@ func (s *Store) GetOrphanedExecutions(ctx context.Context, olderThan time.Time, 
 	return result, nil
 }
 
+// DequeueExecution atomically claims one emitted execution by transitioning it
+// to in_progress with a claimed_at timestamp. Returns nil, nil if no work available.
+// Uses SELECT FOR UPDATE SKIP LOCKED to prevent double-claim under concurrency.
+func (s *Store) DequeueExecution(ctx context.Context) (*domain.Execution, error) {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var exec domain.Execution
+	var status string
+
+	err = tx.QueryRowContext(ctx, queryDequeueExecution).Scan(
+		&exec.ID,
+		&exec.JobID,
+		&exec.ProjectID,
+		&exec.ScheduledAt,
+		&exec.FiredAt,
+		&status,
+		&exec.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		// No work available — commit to release any advisory locks and return nil
+		tx.Commit()
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	exec.Status = domain.ExecutionStatus(status)
+
+	// Atomically transition to in_progress with claim timestamp
+	_, err = tx.ExecContext(ctx, queryClaimExecution, exec.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	exec.Status = domain.ExecutionStatusInProgress
+	return &exec, nil
+}
+
+// RequeueStaleExecutions resets in_progress executions older than olderThan back
+// to emitted status. Uses a CTE with FOR UPDATE SKIP LOCKED to avoid interfering
+// with active DequeueExecution transactions.
+func (s *Store) RequeueStaleExecutions(ctx context.Context, olderThan time.Time, limit int) (int, error) {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
+	result, err := s.db.ExecContext(ctx, queryRequeueStaleExecutions, olderThan, limit)
+	if err != nil {
+		return 0, err
+	}
+
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	return int(n), nil
+}
+
 // Compile-time interface assertions
 var (
 	_ scheduler.Store  = (*Store)(nil)

@@ -93,3 +93,12 @@ func (b *EventBus) Emit(ctx context.Context, event domain.TriggerEvent) error {
 func (b *EventBus) Channel() <-chan domain.TriggerEvent {
 	return b.ch
 }
+
+// NopEmitter is an EventEmitter that discards all events.
+// Used in DB dispatch mode where the channel is not consumed.
+type NopEmitter struct{}
+
+// Emit discards the event and returns nil.
+func (NopEmitter) Emit(_ context.Context, _ domain.TriggerEvent) error {
+	return nil
+}

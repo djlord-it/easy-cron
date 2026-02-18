@@ -140,6 +140,24 @@ type Config struct {
 
 	// CircuitBreakerCooldownStr is the string representation for JSON output.
 	CircuitBreakerCooldownStr string `json:"circuit_breaker_cooldown"`
+
+	// DispatchMode controls how the dispatcher receives events.
+	// "channel" = in-memory channel (default), "db" = Postgres FOR UPDATE SKIP LOCKED polling.
+	// Environment variable: DISPATCH_MODE
+	DispatchMode string `json:"dispatch_mode"`
+
+	// DBPollInterval is the sleep duration between DB polls when no work is found.
+	// Only used when DISPATCH_MODE=db.
+	// Default: 500ms
+	// Environment variable: DB_POLL_INTERVAL
+	DBPollInterval    time.Duration `json:"-"`
+	DBPollIntervalStr string        `json:"db_poll_interval"`
+
+	// DispatcherWorkers is the number of concurrent DB-poll worker goroutines.
+	// Only used when DISPATCH_MODE=db.
+	// Default: 1
+	// Environment variable: DISPATCHER_WORKERS
+	DispatcherWorkers int `json:"dispatcher_workers"`
 }
 
 // Load reads configuration from environment variables.
@@ -197,6 +215,26 @@ func Load() Config {
 	}
 
 	cfg.CircuitBreakerCooldownStr = os.Getenv("CIRCUIT_BREAKER_COOLDOWN")
+
+	// Parse dispatch mode (default "channel")
+	cfg.DispatchMode = os.Getenv("DISPATCH_MODE")
+	if cfg.DispatchMode == "" {
+		cfg.DispatchMode = "channel"
+	}
+
+	cfg.DBPollIntervalStr = os.Getenv("DB_POLL_INTERVAL")
+
+	// Parse dispatcher workers (default 1)
+	if workersStr := os.Getenv("DISPATCHER_WORKERS"); workersStr != "" {
+		if n, err := parseInt(workersStr); err == nil && n > 0 {
+			cfg.DispatcherWorkers = n
+		} else {
+			log.Printf("config: invalid DISPATCHER_WORKERS %q (must be a positive integer), using default 1", workersStr)
+		}
+	}
+	if cfg.DispatcherWorkers == 0 {
+		cfg.DispatcherWorkers = 1
+	}
 
 	// Parse DB pool sizes
 	if maxOpenStr := os.Getenv("DB_MAX_OPEN_CONNS"); maxOpenStr != "" {
@@ -256,6 +294,9 @@ func Load() Config {
 	if cfg.CircuitBreakerCooldownStr == "" {
 		cfg.CircuitBreakerCooldownStr = "2m"
 	}
+	if cfg.DBPollIntervalStr == "" {
+		cfg.DBPollIntervalStr = "500ms"
+	}
 
 	// Parse durations (validation happens separately)
 	if d, err := time.ParseDuration(cfg.TickIntervalStr); err == nil {
@@ -284,6 +325,9 @@ func Load() Config {
 	}
 	if d, err := time.ParseDuration(cfg.CircuitBreakerCooldownStr); err == nil {
 		cfg.CircuitBreakerCooldown = d
+	}
+	if d, err := time.ParseDuration(cfg.DBPollIntervalStr); err == nil {
+		cfg.DBPollInterval = d
 	}
 
 	return cfg
@@ -324,6 +368,9 @@ func (c Config) MaskedJSON() ([]byte, error) {
 		EventBusBufferSize      int    `json:"eventbus_buffer_size"`
 		CircuitBreakerThreshold int    `json:"circuit_breaker_threshold"`
 		CircuitBreakerCooldown  string `json:"circuit_breaker_cooldown"`
+		DispatchMode            string `json:"dispatch_mode"`
+		DBPollInterval          string `json:"db_poll_interval"`
+		DispatcherWorkers       int    `json:"dispatcher_workers"`
 	}{
 		DatabaseURL:            maskSecret(c.DatabaseURL),
 		RedisAddr:              c.RedisAddr,
@@ -345,6 +392,9 @@ func (c Config) MaskedJSON() ([]byte, error) {
 		EventBusBufferSize:      c.EventBusBufferSize,
 		CircuitBreakerThreshold: c.CircuitBreakerThreshold,
 		CircuitBreakerCooldown:  c.CircuitBreakerCooldownStr,
+		DispatchMode:            c.DispatchMode,
+		DBPollInterval:          c.DBPollIntervalStr,
+		DispatcherWorkers:       c.DispatcherWorkers,
 	}
 	return json.MarshalIndent(masked, "", "  ")
 }

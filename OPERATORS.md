@@ -17,6 +17,9 @@ This document defines the operational contract for EasyCron. It describes what t
 | `DISPATCHER_DRAIN_TIMEOUT` | `30s` | Time to wait for buffered events during shutdown |
 | `CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive execution failures before circuit opens (0 = disabled) |
 | `CIRCUIT_BREAKER_COOLDOWN` | `2m` | Cooldown before allowing a probe attempt to an open circuit |
+| `DISPATCH_MODE` | `channel` | Dispatch mode: `channel` (in-memory EventBus) or `db` (Postgres polling) |
+| `DB_POLL_INTERVAL` | `500ms` | Sleep between DB polls when idle (DB mode only) |
+| `DISPATCHER_WORKERS` | `1` | Concurrent dispatch workers (DB mode only) |
 
 ### Why These Defaults
 
@@ -193,6 +196,44 @@ easycron: circuit breaker enabled (threshold=5, cooldown=2m0s)
 dispatcher: job=X circuit open for http://example.com/hook, skipping
 ```
 
+## Dispatch Modes
+
+EasyCron supports two dispatch modes, controlled by `DISPATCH_MODE`.
+
+### Channel Mode (default)
+
+The scheduler emits events to an in-memory EventBus (buffered channel, capacity 100). A single dispatcher goroutine reads events and delivers webhooks. This is the original behavior.
+
+- Simple, low-latency, no extra DB load
+- Events in the buffer are lost on crash
+- Single dispatcher goroutine
+
+### DB Mode
+
+Set `DISPATCH_MODE=db`. Workers poll Postgres directly using `SELECT ... FOR UPDATE SKIP LOCKED` to claim `emitted` executions. A `claimed_at` timestamp is set on claim; the reconciler can requeue rows where `claimed_at` is stale.
+
+- No in-memory buffer to lose on crash
+- Multiple concurrent workers via `DISPATCHER_WORKERS`
+- Suitable for horizontal scaling (multiple processes can poll the same table)
+- Slightly higher DB load due to polling (`DB_POLL_INTERVAL` controls frequency)
+
+### When to Use Each
+
+| | Channel | DB |
+|---|---|---|
+| **Simplicity** | Simpler, fewer moving parts | Requires `schema/003_add_claimed_at.sql` |
+| **Crash resilience** | Events in buffer lost on crash | No in-memory buffer; rows survive crash |
+| **Horizontal scaling** | Single process only | Multiple workers / processes |
+| **DB load** | Lower (reads only at tick) | Higher (polling every `DB_POLL_INTERVAL`) |
+
+### Schema Requirement
+
+DB mode requires the `claimed_at` column. Apply the migration before switching:
+
+```bash
+psql easycron < schema/003_add_claimed_at.sql
+```
+
 ## Failure Modes
 
 ### PostgreSQL Unavailable
@@ -262,16 +303,31 @@ Executions follow this state machine:
                            └──────────► [failed] (terminal)
 ```
 
+In DB dispatch mode, an intermediate `in_progress` state is used:
+
+```
+emitted → in_progress → delivered
+                      → failed
+emitted → delivered (channel mode, no intermediate state)
+emitted → failed
+in_progress → emitted (stale requeue by reconciler)
+```
+
 **Status values:**
 | Status | Meaning | Terminal? |
 |--------|---------|-----------|
 | `emitted` | Execution created, webhook delivery pending | No |
+| `in_progress` | Claimed by a DB-mode worker, delivery underway | No |
 | `delivered` | Webhook returned 2xx | Yes |
 | `failed` | All 4 retry attempts exhausted or non-retryable error | Yes |
 
 **Valid transitions:**
-- `emitted` → `delivered` (webhook returned 2xx)
+- `emitted` → `delivered` (channel mode: webhook returned 2xx)
+- `emitted` → `in_progress` (DB mode: worker claims execution)
 - `emitted` → `failed` (all 4 attempts exhausted or 4xx response)
+- `in_progress` → `delivered` (webhook returned 2xx)
+- `in_progress` → `failed` (all attempts exhausted or non-retryable error)
+- `in_progress` → `emitted` (reconciler requeues stale claim)
 
 **Invalid transitions (blocked by DB query):**
 - `delivered` → any state
@@ -600,6 +656,10 @@ sum(rate(easycron_dispatcher_delivery_outcomes_total[5m]))
 - `dispatcher: job=X delivered attempt=N` - Successful delivery
 - `dispatcher: job=X failed` - All retries exhausted
 - `dispatcher: job=X circuit open for URL, skipping` - Circuit breaker blocked delivery
+- `db_dispatcher: worker N started` - DB mode worker started
+- `db_dispatcher: claimed execution=X` - Worker claimed a row via `SELECT ... FOR UPDATE SKIP LOCKED`
+- `db_dispatcher: no pending executions, sleeping` - Poll found nothing, sleeping `DB_POLL_INTERVAL`
+- `reconciler: requeued N stale executions` - Reconciler reset stale `in_progress` rows to `emitted`
 - `analytics: redis error` - Analytics write failed
 
 ### Database Queries

@@ -213,6 +213,14 @@ func TestEventBus_WithMetrics(t *testing.T) {
 	}
 }
 
+func TestNopEmitter_ReturnsNil(t *testing.T) {
+	var emitter NopEmitter
+	err := emitter.Emit(context.Background(), newTestEvent())
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+}
+
 func TestEventBus_MetricsOnBufferFull(t *testing.T) {
 	metrics := &mockBusMetrics{}
 	bus := NewEventBus(1, WithEmitTimeout(50*time.Millisecond), WithMetrics(metrics))

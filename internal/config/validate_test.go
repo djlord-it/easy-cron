@@ -91,6 +91,30 @@ func TestValidationError_Format(t *testing.T) {
 	}
 }
 
+func TestValidate_DispatchModeInvalid(t *testing.T) {
+	cfg := Config{
+		DatabaseURL:  "postgres://localhost/test",
+		DispatchMode: "invalid",
+	}
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected validation error for invalid DISPATCH_MODE")
+	}
+}
+
+func TestValidate_DispatchModeValid(t *testing.T) {
+	for _, mode := range []string{"channel", "db"} {
+		cfg := Config{
+			DatabaseURL:  "postgres://localhost/test",
+			DispatchMode: mode,
+		}
+		err := Validate(cfg)
+		if err != nil {
+			t.Errorf("unexpected error for mode %q: %v", mode, err)
+		}
+	}
+}
+
 func TestValidationErrors_Format(t *testing.T) {
 	// Single error
 	single := ValidationErrors{{Field: "F1", Message: "M1"}}

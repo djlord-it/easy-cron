@@ -19,6 +19,7 @@ type mockStore struct {
 	executionStatus  map[uuid.UUID]domain.ExecutionStatus
 	deliveryAttempts []domain.DeliveryAttempt
 	statusUpdates    []statusUpdate
+	dequeueResults   []*domain.Execution // for DB poll mode
 }
 
 type statusUpdate struct {
@@ -74,6 +75,17 @@ func (s *mockStore) UpdateExecutionStatus(ctx context.Context, executionID uuid.
 		Denied:      false,
 	})
 	return nil
+}
+
+func (s *mockStore) DequeueExecution(ctx context.Context) (*domain.Execution, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.dequeueResults) == 0 {
+		return nil, nil
+	}
+	result := s.dequeueResults[0]
+	s.dequeueResults = s.dequeueResults[1:]
+	return result, nil
 }
 
 func (s *mockStore) setExecutionStatus(id uuid.UUID, status domain.ExecutionStatus) {
@@ -616,5 +628,129 @@ func TestDispatch_NilBreaker_Works(t *testing.T) {
 	err := disp.Dispatch(context.Background(), event)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+func TestRunDBPoll_ProcessesExecution(t *testing.T) {
+	store := newMockStore()
+	sender := &mockSender{results: []WebhookResult{
+		{StatusCode: 200},
+	}}
+
+	jobID := uuid.New()
+	execID := uuid.New()
+	store.addJob(domain.Job{
+		ID:        jobID,
+		ProjectID: uuid.New(),
+		Name:      "test-job",
+		Enabled:   true,
+		Delivery: domain.DeliveryConfig{
+			Type:       "webhook",
+			WebhookURL: "http://example.com/hook",
+			Timeout:    30 * time.Second,
+		},
+	})
+
+	store.mu.Lock()
+	store.dequeueResults = []*domain.Execution{{
+		ID:          execID,
+		JobID:       jobID,
+		ProjectID:   uuid.New(),
+		ScheduledAt: time.Now(),
+		FiredAt:     time.Now(),
+		Status:      domain.ExecutionStatusInProgress,
+		CreatedAt:   time.Now(),
+	}}
+	store.mu.Unlock()
+
+	disp := New(store, sender)
+	disp.backoff = []time.Duration{0, 0, 0, 0}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	disp.RunDBPoll(ctx, 50*time.Millisecond, 1)
+
+	store.mu.Lock()
+	status := store.executionStatus[execID]
+	store.mu.Unlock()
+	if status != domain.ExecutionStatusDelivered {
+		t.Errorf("expected delivered, got %v", status)
+	}
+}
+
+func TestRunDBPoll_SleepsWhenNoWork(t *testing.T) {
+	store := newMockStore()
+	sender := &mockSender{}
+
+	disp := New(store, sender)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	disp.RunDBPoll(ctx, 50*time.Millisecond, 1)
+	elapsed := time.Since(start)
+
+	if elapsed < 100*time.Millisecond {
+		t.Errorf("expected to run for ~150ms, exited after %v", elapsed)
+	}
+
+	if sender.callCount() > 0 {
+		t.Errorf("expected 0 send calls, got %d", sender.callCount())
+	}
+}
+
+func TestRunDBPoll_MultipleWorkers(t *testing.T) {
+	store := newMockStore()
+	sender := &mockSender{results: []WebhookResult{
+		{StatusCode: 200},
+		{StatusCode: 200},
+	}}
+
+	jobID := uuid.New()
+	store.addJob(domain.Job{
+		ID:        jobID,
+		ProjectID: uuid.New(),
+		Name:      "test-job",
+		Enabled:   true,
+		Delivery: domain.DeliveryConfig{
+			Type:       "webhook",
+			WebhookURL: "http://example.com/hook",
+			Timeout:    30 * time.Second,
+		},
+	})
+
+	exec1 := &domain.Execution{
+		ID: uuid.New(), JobID: jobID, ProjectID: uuid.New(),
+		ScheduledAt: time.Now(), FiredAt: time.Now(),
+		Status: domain.ExecutionStatusInProgress, CreatedAt: time.Now(),
+	}
+	exec2 := &domain.Execution{
+		ID: uuid.New(), JobID: jobID, ProjectID: uuid.New(),
+		ScheduledAt: time.Now(), FiredAt: time.Now(),
+		Status: domain.ExecutionStatusInProgress, CreatedAt: time.Now(),
+	}
+	store.mu.Lock()
+	store.dequeueResults = []*domain.Execution{exec1, exec2}
+	store.mu.Unlock()
+
+	disp := New(store, sender)
+	disp.backoff = []time.Duration{0, 0, 0, 0}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	disp.RunDBPoll(ctx, 50*time.Millisecond, 2)
+
+	store.mu.Lock()
+	s1 := store.executionStatus[exec1.ID]
+	s2 := store.executionStatus[exec2.ID]
+	store.mu.Unlock()
+	if s1 != domain.ExecutionStatusDelivered {
+		t.Errorf("exec1: expected delivered, got %v", s1)
+	}
+	if s2 != domain.ExecutionStatusDelivered {
+		t.Errorf("exec2: expected delivered, got %v", s2)
 	}
 }

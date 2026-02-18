@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,6 +45,9 @@ type Store interface {
 	// reject transitions from terminal states (delivered/failed) and return
 	// ErrStatusTransitionDenied. This ensures idempotency on replay.
 	UpdateExecutionStatus(ctx context.Context, executionID uuid.UUID, status domain.ExecutionStatus) error
+	// DequeueExecution atomically claims one emitted execution (DB poll mode).
+	// Returns nil, nil if no work available.
+	DequeueExecution(ctx context.Context) (*domain.Execution, error)
 }
 
 type WebhookSender interface {
@@ -200,6 +204,70 @@ func (d *Dispatcher) drain(ch <-chan domain.TriggerEvent) {
 			}
 			return
 		}
+	}
+}
+
+// RunDBPoll starts workers that poll the database for emitted executions.
+// Each worker independently dequeues and dispatches one execution at a time.
+// Workers sleep pollInterval when no work is found, and immediately loop when work exists.
+// Blocks until all workers exit (on context cancellation).
+func (d *Dispatcher) RunDBPoll(ctx context.Context, pollInterval time.Duration, workers int) {
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			d.dbPollWorker(ctx, workerID, pollInterval)
+		}(i)
+	}
+	log.Printf("dispatcher: started %d DB poll workers (interval=%s)", workers, pollInterval)
+	wg.Wait()
+	log.Printf("dispatcher: all DB poll workers stopped")
+}
+
+func (d *Dispatcher) dbPollWorker(ctx context.Context, workerID int, pollInterval time.Duration) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		exec, err := d.store.DequeueExecution(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("dispatcher: worker=%d dequeue error: %v", workerID, err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(pollInterval):
+			}
+			continue
+		}
+
+		if exec == nil {
+			// No work available — sleep
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(pollInterval):
+			}
+			continue
+		}
+
+		event := domain.TriggerEvent{
+			ExecutionID: exec.ID,
+			JobID:       exec.JobID,
+			ProjectID:   exec.ProjectID,
+			ScheduledAt: exec.ScheduledAt,
+			FiredAt:     exec.FiredAt,
+			CreatedAt:   exec.CreatedAt,
+		}
+
+		if err := d.Dispatch(ctx, event); err != nil {
+			log.Printf("dispatcher: worker=%d dispatch error: %v", workerID, err)
+		}
+		// Immediately loop — more work may be available
 	}
 }
 

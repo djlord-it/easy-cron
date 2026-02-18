@@ -25,6 +25,7 @@ const SafetyMargin = 150 * time.Second
 // Store defines the interface for fetching orphaned executions.
 type Store interface {
 	GetOrphanedExecutions(ctx context.Context, olderThan time.Time, maxResults int) ([]domain.Execution, error)
+	RequeueStaleExecutions(ctx context.Context, olderThan time.Time, limit int) (int, error)
 }
 
 // EventEmitter defines the interface for emitting trigger events.
@@ -116,6 +117,15 @@ func (r *Reconciler) Run(ctx context.Context) {
 func (r *Reconciler) runCycle(ctx context.Context) {
 	now := r.clock().UTC()
 	threshold := now.Add(-r.config.Threshold)
+
+	// Requeue stale in_progress executions (DB dispatch mode crash recovery).
+	// In channel mode this is a no-op (no in_progress rows exist).
+	requeued, err := r.store.RequeueStaleExecutions(ctx, threshold, r.config.BatchSize)
+	if err != nil {
+		log.Printf("reconciler: failed to requeue stale executions: %v", err)
+	} else if requeued > 0 {
+		log.Printf("reconciler: requeued %d stale in_progress executions", requeued)
+	}
 
 	orphans, err := r.store.GetOrphanedExecutions(ctx, threshold, r.config.BatchSize)
 	if err != nil {

@@ -41,6 +41,10 @@ func (s *mockStore) GetOrphanedExecutions(ctx context.Context, olderThan time.Ti
 	return result, nil
 }
 
+func (s *mockStore) RequeueStaleExecutions(ctx context.Context, olderThan time.Time, limit int) (int, error) {
+	return 0, nil
+}
+
 func (s *mockStore) setOrphans(orphans []domain.Execution) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -470,4 +474,40 @@ func TestReconciler_ThresholdExceedsMaxRetryDuration(t *testing.T) {
 		t.Errorf("reconciler threshold (%s) must exceed dispatcher max retry duration (%s) "+
 			"to prevent duplicate webhook deliveries", cfg.Threshold, maxRetry)
 	}
+}
+
+// TestReconciler_RequeuesStaleExecutions verifies that RequeueStaleExecutions
+// is called during runCycle.
+func TestReconciler_RequeuesStaleExecutions(t *testing.T) {
+	store := &mockStoreWithRequeue{
+		mockStore: mockStore{},
+	}
+	emitter := &mockEmitter{}
+
+	recon := New(Config{
+		Interval:  50 * time.Millisecond,
+		Threshold: 10 * time.Minute,
+		BatchSize: 100,
+	}, store, emitter)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	recon.Run(ctx)
+
+	if !store.requeueCalled {
+		t.Error("expected RequeueStaleExecutions to be called")
+	}
+}
+
+type mockStoreWithRequeue struct {
+	mockStore
+	mu            sync.Mutex
+	requeueCalled bool
+}
+
+func (s *mockStoreWithRequeue) RequeueStaleExecutions(ctx context.Context, olderThan time.Time, limit int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requeueCalled = true
+	return 0, nil
 }
