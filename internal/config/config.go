@@ -124,6 +124,22 @@ type Config struct {
 	// Default: 100
 	// Environment variable: EVENTBUS_BUFFER_SIZE
 	EventBusBufferSize int `json:"eventbus_buffer_size"`
+
+	// CircuitBreakerThreshold is the number of consecutive execution failures
+	// before the circuit opens for a webhook URL.
+	// 0 disables the circuit breaker.
+	// Default: 5
+	// Environment variable: CIRCUIT_BREAKER_THRESHOLD
+	CircuitBreakerThreshold int `json:"circuit_breaker_threshold"`
+
+	// CircuitBreakerCooldown is how long to wait before allowing a probe
+	// attempt to a URL with an open circuit.
+	// Default: 2m
+	// Environment variable: CIRCUIT_BREAKER_COOLDOWN
+	CircuitBreakerCooldown time.Duration `json:"-"`
+
+	// CircuitBreakerCooldownStr is the string representation for JSON output.
+	CircuitBreakerCooldownStr string `json:"circuit_breaker_cooldown"`
 }
 
 // Load reads configuration from environment variables.
@@ -167,6 +183,20 @@ func Load() Config {
 	if cfg.EventBusBufferSize == 0 {
 		cfg.EventBusBufferSize = 100
 	}
+
+	// Parse circuit breaker threshold (default 5)
+	if cbThreshStr := os.Getenv("CIRCUIT_BREAKER_THRESHOLD"); cbThreshStr != "" {
+		if n, err := parseInt(cbThreshStr); err == nil {
+			cfg.CircuitBreakerThreshold = n
+		} else {
+			log.Printf("config: invalid CIRCUIT_BREAKER_THRESHOLD %q, using default 5", cbThreshStr)
+		}
+	}
+	if cfg.CircuitBreakerThreshold == 0 && os.Getenv("CIRCUIT_BREAKER_THRESHOLD") == "" {
+		cfg.CircuitBreakerThreshold = 5
+	}
+
+	cfg.CircuitBreakerCooldownStr = os.Getenv("CIRCUIT_BREAKER_COOLDOWN")
 
 	// Parse DB pool sizes
 	if maxOpenStr := os.Getenv("DB_MAX_OPEN_CONNS"); maxOpenStr != "" {
@@ -223,6 +253,9 @@ func Load() Config {
 	if cfg.ReconcileThresholdStr == "" {
 		cfg.ReconcileThresholdStr = "15m"
 	}
+	if cfg.CircuitBreakerCooldownStr == "" {
+		cfg.CircuitBreakerCooldownStr = "2m"
+	}
 
 	// Parse durations (validation happens separately)
 	if d, err := time.ParseDuration(cfg.TickIntervalStr); err == nil {
@@ -248,6 +281,9 @@ func Load() Config {
 	}
 	if d, err := time.ParseDuration(cfg.ReconcileThresholdStr); err == nil {
 		cfg.ReconcileThreshold = d
+	}
+	if d, err := time.ParseDuration(cfg.CircuitBreakerCooldownStr); err == nil {
+		cfg.CircuitBreakerCooldown = d
 	}
 
 	return cfg
@@ -285,7 +321,9 @@ func (c Config) MaskedJSON() ([]byte, error) {
 		ReconcileInterval      string `json:"reconcile_interval"`
 		ReconcileThreshold     string `json:"reconcile_threshold"`
 		ReconcileBatchSize     int    `json:"reconcile_batch_size"`
-		EventBusBufferSize     int    `json:"eventbus_buffer_size"`
+		EventBusBufferSize      int    `json:"eventbus_buffer_size"`
+		CircuitBreakerThreshold int    `json:"circuit_breaker_threshold"`
+		CircuitBreakerCooldown  string `json:"circuit_breaker_cooldown"`
 	}{
 		DatabaseURL:            maskSecret(c.DatabaseURL),
 		RedisAddr:              c.RedisAddr,
@@ -304,7 +342,9 @@ func (c Config) MaskedJSON() ([]byte, error) {
 		ReconcileInterval:      c.ReconcileIntervalStr,
 		ReconcileThreshold:     c.ReconcileThresholdStr,
 		ReconcileBatchSize:     c.ReconcileBatchSize,
-		EventBusBufferSize:     c.EventBusBufferSize,
+		EventBusBufferSize:      c.EventBusBufferSize,
+		CircuitBreakerThreshold: c.CircuitBreakerThreshold,
+		CircuitBreakerCooldown:  c.CircuitBreakerCooldownStr,
 	}
 	return json.MarshalIndent(masked, "", "  ")
 }

@@ -20,5 +20,6 @@ go.work.sum
 *.md
 !README.md
 !OPERATORS.md
+.claude/
 dist/
 docs/
