@@ -18,11 +18,12 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/djlord-it/easy-cron/internal/analytics"
-	"github.com/djlord-it/easy-cron/internal/circuitbreaker"
 	"github.com/djlord-it/easy-cron/internal/api"
+	"github.com/djlord-it/easy-cron/internal/circuitbreaker"
 	"github.com/djlord-it/easy-cron/internal/config"
 	"github.com/djlord-it/easy-cron/internal/cron"
 	"github.com/djlord-it/easy-cron/internal/dispatcher"
+	"github.com/djlord-it/easy-cron/internal/domain"
 	"github.com/djlord-it/easy-cron/internal/metrics"
 	"github.com/djlord-it/easy-cron/internal/reconciler"
 	"github.com/djlord-it/easy-cron/internal/scheduler"
@@ -125,6 +126,10 @@ Environment Variables:
   CIRCUIT_BREAKER_THRESHOLD Circuit breaker failure threshold (default: "5", 0=disabled)
   CIRCUIT_BREAKER_COOLDOWN  Circuit breaker cooldown duration (default: "2m")
 
+  DISPATCH_MODE             Dispatch mode: "channel" or "db" (default: "channel")
+  DB_POLL_INTERVAL          DB poll sleep interval (default: "500ms", db mode only)
+  DISPATCHER_WORKERS        Concurrent dispatch workers (default: "1", db mode only)
+
   METRICS_ENABLED           Enable Prometheus metrics (default: "false")
   METRICS_PATH              Metrics endpoint path (default: "/metrics")
 
@@ -178,18 +183,36 @@ func runServe() int {
 		log.Println("easycron: METRICS_ENABLED not set; metrics disabled")
 	}
 
-	// Create event bus with optional metrics
-	var busOpts []channel.Option
-	if metricsSink != nil {
-		busOpts = append(busOpts, channel.WithMetrics(metricsSink))
+	// Dispatch mode determines how events flow from scheduler to dispatcher.
+	// Both scheduler.EventEmitter and reconciler.EventEmitter have the same
+	// Emit method; NopEmitter and EventBus implement both.
+	var emitter interface {
+		Emit(ctx context.Context, event domain.TriggerEvent) error
 	}
-	bus := channel.NewEventBus(cfg.EventBusBufferSize, busOpts...)
+	var dispatchCh <-chan domain.TriggerEvent
+
+	if cfg.DispatchMode == "db" {
+		// DB mode: scheduler writes rows, workers poll Postgres directly
+		emitter = channel.NopEmitter{}
+		log.Printf("easycron: dispatch mode=db (workers=%d, poll_interval=%s)",
+			cfg.DispatcherWorkers, cfg.DBPollInterval)
+	} else {
+		// Channel mode: in-memory event bus (default)
+		var busOpts []channel.Option
+		if metricsSink != nil {
+			busOpts = append(busOpts, channel.WithMetrics(metricsSink))
+		}
+		bus := channel.NewEventBus(cfg.EventBusBufferSize, busOpts...)
+		emitter = bus
+		dispatchCh = bus.Channel()
+		log.Printf("easycron: dispatch mode=channel (buffer=%d)", cfg.EventBusBufferSize)
+	}
 
 	sched := scheduler.New(
 		scheduler.Config{TickInterval: cfg.TickInterval},
 		store,
 		cronParser,
-		bus,
+		emitter,
 	)
 	if metricsSink != nil {
 		sched = sched.WithMetrics(metricsSink)
@@ -265,7 +288,11 @@ func runServe() int {
 	dispatcherWg.Add(1)
 	go func() {
 		defer dispatcherWg.Done()
-		disp.Run(dispatcherCtx, bus.Channel())
+		if cfg.DispatchMode == "db" {
+			disp.RunDBPoll(dispatcherCtx, cfg.DBPollInterval, cfg.DispatcherWorkers)
+		} else {
+			disp.Run(dispatcherCtx, dispatchCh)
+		}
 	}()
 
 	// Start reconciler if enabled
@@ -279,7 +306,7 @@ func runServe() int {
 				BatchSize: cfg.ReconcileBatchSize,
 			},
 			store,
-			bus,
+			emitter,
 		)
 		if metricsSink != nil {
 			recon = recon.WithMetrics(metricsSink)
