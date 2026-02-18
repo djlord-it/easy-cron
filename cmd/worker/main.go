@@ -133,6 +133,10 @@ func (s *stubStore) UpdateExecutionStatus(ctx context.Context, executionID uuid.
 	return nil
 }
 
+func (s *stubStore) DequeueExecution(ctx context.Context) (*domain.Execution, error) {
+	return nil, nil
+}
+
 type stubCronParser struct{}
 
 func (p *stubCronParser) Parse(expression string, timezone string) (scheduler.CronSchedule, error) {
