@@ -61,6 +61,14 @@ func Validate(cfg Config) error {
 		}
 	}
 
+	// DISPATCH_MODE must be "channel" or "db"
+	if cfg.DispatchMode != "" && cfg.DispatchMode != "channel" && cfg.DispatchMode != "db" {
+		errs = append(errs, ValidationError{
+			Field:   "DISPATCH_MODE",
+			Message: fmt.Sprintf("must be 'channel' or 'db', got %q", cfg.DispatchMode),
+		})
+	}
+
 	if len(errs) > 0 {
 		return errs
 	}

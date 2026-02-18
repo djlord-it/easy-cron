@@ -218,6 +218,47 @@ func TestLoad_CircuitBreakerDisabled(t *testing.T) {
 	}
 }
 
+func TestLoad_DispatchModeDefaults(t *testing.T) {
+	os.Unsetenv("DISPATCH_MODE")
+	os.Unsetenv("DB_POLL_INTERVAL")
+	os.Unsetenv("DISPATCHER_WORKERS")
+
+	cfg := Load()
+
+	if cfg.DispatchMode != "channel" {
+		t.Errorf("DispatchMode: expected 'channel', got %q", cfg.DispatchMode)
+	}
+	if cfg.DBPollInterval != 500*time.Millisecond {
+		t.Errorf("DBPollInterval: expected 500ms, got %v", cfg.DBPollInterval)
+	}
+	if cfg.DispatcherWorkers != 1 {
+		t.Errorf("DispatcherWorkers: expected 1, got %d", cfg.DispatcherWorkers)
+	}
+}
+
+func TestLoad_DispatchModeDB(t *testing.T) {
+	os.Setenv("DISPATCH_MODE", "db")
+	os.Setenv("DB_POLL_INTERVAL", "1s")
+	os.Setenv("DISPATCHER_WORKERS", "4")
+	defer func() {
+		os.Unsetenv("DISPATCH_MODE")
+		os.Unsetenv("DB_POLL_INTERVAL")
+		os.Unsetenv("DISPATCHER_WORKERS")
+	}()
+
+	cfg := Load()
+
+	if cfg.DispatchMode != "db" {
+		t.Errorf("DispatchMode: expected 'db', got %q", cfg.DispatchMode)
+	}
+	if cfg.DBPollInterval != 1*time.Second {
+		t.Errorf("DBPollInterval: expected 1s, got %v", cfg.DBPollInterval)
+	}
+	if cfg.DispatcherWorkers != 4 {
+		t.Errorf("DispatcherWorkers: expected 4, got %d", cfg.DispatcherWorkers)
+	}
+}
+
 func containsString(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
