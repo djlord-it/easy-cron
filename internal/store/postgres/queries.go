@@ -96,3 +96,33 @@ WHERE status = 'emitted'
 ORDER BY created_at ASC
 LIMIT $2
 `
+
+const queryDequeueExecution = `
+SELECT id, job_id, project_id, scheduled_at, fired_at, status, created_at
+FROM executions
+WHERE status = 'emitted'
+ORDER BY created_at ASC
+FOR UPDATE SKIP LOCKED
+LIMIT 1
+`
+
+const queryClaimExecution = `
+UPDATE executions
+SET status = 'in_progress', claimed_at = NOW()
+WHERE id = $1
+`
+
+const queryRequeueStaleExecutions = `
+WITH stale AS (
+    SELECT id FROM executions
+    WHERE status = 'in_progress'
+      AND claimed_at < $1
+    ORDER BY claimed_at ASC
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE executions
+SET status = 'emitted', claimed_at = NULL
+FROM stale
+WHERE executions.id = stale.id
+`
