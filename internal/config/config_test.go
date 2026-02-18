@@ -175,6 +175,49 @@ func TestMaskedJSON_IncludesEventBusBufferSize(t *testing.T) {
 	}
 }
 
+func TestLoad_CircuitBreakerDefaults(t *testing.T) {
+	os.Unsetenv("CIRCUIT_BREAKER_THRESHOLD")
+	os.Unsetenv("CIRCUIT_BREAKER_COOLDOWN")
+
+	cfg := Load()
+
+	if cfg.CircuitBreakerThreshold != 5 {
+		t.Errorf("CircuitBreakerThreshold: expected 5, got %d", cfg.CircuitBreakerThreshold)
+	}
+	if cfg.CircuitBreakerCooldown != 2*time.Minute {
+		t.Errorf("CircuitBreakerCooldown: expected 2m, got %v", cfg.CircuitBreakerCooldown)
+	}
+}
+
+func TestLoad_CircuitBreakerCustomValues(t *testing.T) {
+	os.Setenv("CIRCUIT_BREAKER_THRESHOLD", "10")
+	os.Setenv("CIRCUIT_BREAKER_COOLDOWN", "5m")
+	defer func() {
+		os.Unsetenv("CIRCUIT_BREAKER_THRESHOLD")
+		os.Unsetenv("CIRCUIT_BREAKER_COOLDOWN")
+	}()
+
+	cfg := Load()
+
+	if cfg.CircuitBreakerThreshold != 10 {
+		t.Errorf("CircuitBreakerThreshold: expected 10, got %d", cfg.CircuitBreakerThreshold)
+	}
+	if cfg.CircuitBreakerCooldown != 5*time.Minute {
+		t.Errorf("CircuitBreakerCooldown: expected 5m, got %v", cfg.CircuitBreakerCooldown)
+	}
+}
+
+func TestLoad_CircuitBreakerDisabled(t *testing.T) {
+	os.Setenv("CIRCUIT_BREAKER_THRESHOLD", "0")
+	defer os.Unsetenv("CIRCUIT_BREAKER_THRESHOLD")
+
+	cfg := Load()
+
+	if cfg.CircuitBreakerThreshold != 0 {
+		t.Errorf("CircuitBreakerThreshold: expected 0, got %d", cfg.CircuitBreakerThreshold)
+	}
+}
+
 func containsString(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
