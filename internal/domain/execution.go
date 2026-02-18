@@ -9,8 +9,9 @@ import (
 type ExecutionStatus string
 
 const (
-	ExecutionStatusEmitted   ExecutionStatus = "emitted"
-	ExecutionStatusDelivered ExecutionStatus = "delivered"
+	ExecutionStatusEmitted    ExecutionStatus = "emitted"
+	ExecutionStatusInProgress ExecutionStatus = "in_progress"
+	ExecutionStatusDelivered  ExecutionStatus = "delivered"
 	ExecutionStatusFailed    ExecutionStatus = "failed"
 )
 
@@ -26,4 +27,5 @@ type Execution struct {
 	Status      ExecutionStatus
 
 	CreatedAt time.Time
+	ClaimedAt *time.Time // set when dequeued, nil otherwise
 }
