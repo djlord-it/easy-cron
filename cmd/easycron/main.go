@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -241,6 +242,8 @@ func runServe() int {
 		return exitInvalidConfig
 	}
 
+	logConfigWarnings(&cfg)
+
 	db, err := sql.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
@@ -259,6 +262,13 @@ func runServe() int {
 	if err := db.Ping(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to connect to database: %v\n", err)
 		return exitRuntimeError
+	}
+
+	if cfg.DispatchMode == "db" {
+		if err := probeClaimedAtColumn(db); err != nil {
+			fmt.Fprintf(os.Stderr, "DISPATCH_MODE=db migration probe failed: %v\n", err)
+			return exitInvalidConfig
+		}
 	}
 
 	store := postgres.New(db, cfg.DBOpTimeout)
@@ -523,4 +533,42 @@ func runConfig() int {
 func runVersion() int {
 	fmt.Printf("easycron version %s (commit: %s)\n", version, commit)
 	return exitSuccess
+}
+
+// probeClaimedAtColumn checks that the claimed_at column exists on the
+// executions table, which is required for DB dispatch mode (migration 003).
+func probeClaimedAtColumn(db *sql.DB) error {
+	var col string
+	err := db.QueryRow(
+		"SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='executions' AND column_name='claimed_at'",
+	).Scan(&col)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("column 'claimed_at' not found on 'executions' table — apply migration 003_add_claimed_at.sql")
+	}
+	return err
+}
+
+// logConfigWarnings emits startup warnings for dangerous or suboptimal
+// configuration combinations. It runs after config validation passes and
+// before any connections are opened.
+func logConfigWarnings(cfg *config.Config) {
+	if cfg.DispatchMode == "channel" && !cfg.ReconcileEnabled {
+		log.Printf("WARNING [P0]: DISPATCH_MODE=channel with RECONCILE_ENABLED=false — orphaned executions from buffer overflow will be PERMANENTLY LOST. Set RECONCILE_ENABLED=true for production.")
+	}
+
+	if !cfg.ReconcileEnabled {
+		log.Printf("WARNING [P0]: RECONCILE_ENABLED=false — no automatic orphan recovery. Crashed or timed-out executions will remain stuck. Set RECONCILE_ENABLED=true for production.")
+	}
+
+	if !cfg.MetricsEnabled {
+		log.Printf("WARNING [P1]: METRICS_ENABLED=false — Prometheus metrics unavailable. You will have NO visibility into buffer saturation, orphans, or delivery outcomes.")
+	}
+
+	if cfg.DispatchMode == "channel" {
+		log.Printf("INFO: DISPATCH_MODE=channel — single-instance only. DO NOT run multiple instances in this mode (causes duplicate webhooks with no coordination).")
+	}
+
+	if cfg.DispatchMode == "db" && cfg.DispatcherWorkers == 1 {
+		log.Printf("INFO: DISPATCH_MODE=db with DISPATCHER_WORKERS=1 — consider increasing to 2-4 for production workloads.")
+	}
 }

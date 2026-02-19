@@ -80,11 +80,23 @@ curl http://localhost:8080/jobs/{job_id}/executions
 go build -o easycron ./cmd/easycron
 createdb easycron
 psql easycron < schema/001_initial.sql
+psql easycron < schema/002_add_indexes.sql
 psql easycron < schema/003_add_claimed_at.sql
 export DATABASE_URL="postgres://localhost/easycron?sslmode=disable"
 ./easycron serve
 ```
 </details>
+
+## Production Checklist
+
+- [ ] All migrations applied: `001_initial.sql`, `002_add_indexes.sql`, `003_add_claimed_at.sql`
+- [ ] `RECONCILE_ENABLED=true` — without this, orphaned executions are **permanently lost**
+- [ ] `METRICS_ENABLED=true`
+- [ ] `DISPATCH_MODE=db` if running multiple instances
+- [ ] Webhook handlers are idempotent (use `X-EasyCron-Execution-ID`)
+- [ ] Alert on `easycron_orphaned_executions > 0`
+
+> Full details: [Operator Guide](OPERATORS.md)
 
 ## Configuration
 
@@ -100,6 +112,8 @@ All configuration is via environment variables. Run `./easycron --help` for the 
 | `RECONCILE_ENABLED` | `false` | Enable orphan recovery (**set `true` in production**) |
 | `METRICS_ENABLED` | `false` | Enable Prometheus `/metrics` endpoint |
 | `CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive failures before circuit opens (0 = disabled) |
+
+> **DO NOT run multiple instances with `DISPATCH_MODE=channel`.** Channel mode uses an in-memory event bus with no cross-instance coordination. Multiple instances will each run their own scheduler, producing duplicate webhook deliveries. Use `DISPATCH_MODE=db` for any multi-instance deployment.
 
 ## API
 
@@ -159,15 +173,6 @@ METRICS_ENABLED=true
 Validate with the HA test harness: `./scripts/ha_test.sh`
 
 > See the [Operator Guide](OPERATORS.md#horizontal-scaling-multi-instance-ha) for tuning, failover timing, and alerting rules.
-
-## Production Checklist
-
-- [ ] `RECONCILE_ENABLED=true`
-- [ ] `METRICS_ENABLED=true`
-- [ ] Webhook handlers are idempotent
-- [ ] Alert on `easycron_orphaned_executions > 0`
-
-> Full details: [Operator Guide](OPERATORS.md)
 
 ## CLI
 

@@ -2,6 +2,7 @@
 .DS_Store
 
 # Go build artifacts
+/easycron
 *.exe
 *.exe~
 *.dll
