@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -261,6 +262,13 @@ func runServe() int {
 	if err := db.Ping(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to connect to database: %v\n", err)
 		return exitRuntimeError
+	}
+
+	if cfg.DispatchMode == "db" {
+		if err := probeClaimedAtColumn(db); err != nil {
+			fmt.Fprintf(os.Stderr, "DISPATCH_MODE=db migration probe failed: %v\n", err)
+			return exitInvalidConfig
+		}
 	}
 
 	store := postgres.New(db, cfg.DBOpTimeout)
@@ -525,6 +533,19 @@ func runConfig() int {
 func runVersion() int {
 	fmt.Printf("easycron version %s (commit: %s)\n", version, commit)
 	return exitSuccess
+}
+
+// probeClaimedAtColumn checks that the claimed_at column exists on the
+// executions table, which is required for DB dispatch mode (migration 003).
+func probeClaimedAtColumn(db *sql.DB) error {
+	var col string
+	err := db.QueryRow(
+		"SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='executions' AND column_name='claimed_at'",
+	).Scan(&col)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("column 'claimed_at' not found on 'executions' table — apply migration 003_add_claimed_at.sql")
+	}
+	return err
 }
 
 // logConfigWarnings emits startup warnings for dangerous or suboptimal
