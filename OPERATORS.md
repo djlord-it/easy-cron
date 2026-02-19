@@ -112,28 +112,29 @@ Copy this checklist before deploying EasyCron to production:
 | `RECONCILE_ENABLED` | `true` | Without this, orphaned executions are **permanently lost** |
 | `METRICS_ENABLED` | `true` | Required for observability and alerting |
 
-## Guarantees and Non-Guarantees
+## Guarantees
 
-**EasyCron guarantees:**
-- At-most-once execution creation per `(job_id, scheduled_at)` — DB unique constraint
-- At-most 4 webhook delivery attempts with bounded backoff
-- Terminal state immutability — `delivered` and `failed` never change
+**Scheduling**
+- At-most-once execution creation per `(job_id, scheduled_at)` — enforced by DB unique constraint, even during split-brain
+- Crash-safe scheduling — executions are persisted to Postgres before dispatch begins (DB mode)
+
+**Delivery**
+- Automatic retry with bounded backoff — up to 4 attempts (0s → 30s → 2m → 10m)
+- Crash recovery — orphaned and in-progress executions are automatically detected and re-dispatched by the reconciler
+- Per-URL circuit breaker — protects downstream services from retry storms
+- Stable execution identity — the same `X-EasyCron-Execution-ID` is preserved across retries and re-emits, enabling simple client-side deduplication
+- Terminal state immutability — `delivered` and `failed` never change once set
+
+**Operations**
 - Bounded DB operations — all queries timeout after `DB_OP_TIMEOUT`
-- Ordered shutdown — scheduler stops before dispatcher drains
-- Idempotent re-emits — reconciler reuses original execution ID
-
-**EasyCron does NOT guarantee:**
-- Webhook delivery — events can be lost (crash, buffer full)
-- Exactly-once delivery — webhooks may arrive 0, 1, or 2+ times
-- Retry continuation after restart — incomplete retries are abandoned
-- Recovery without reconciler — orphans are permanent if disabled
-- In-memory state persistence — event buffer and circuit breaker reset on restart
+- Ordered shutdown — scheduler stops → reconciler stops → dispatcher drains → HTTP drains
+- Automatic leader failover — follower promotes within seconds when the leader dies (DB mode)
+- Zero-downtime rolling deploys — followers continue dispatching and serving API traffic during leadership transitions
 
 **Your responsibilities:**
-1. Set `RECONCILE_ENABLED=true` in production
+1. Use `DISPATCH_MODE=db` and `RECONCILE_ENABLED=true` in production for full crash recovery
 2. Design idempotent webhook handlers (use `X-EasyCron-Execution-ID` for dedup)
 3. Monitor metrics (see [Monitoring](#monitoring))
-4. Keep job frequency under 1000 fires per job per tick
 
 ## Dispatch Modes
 
