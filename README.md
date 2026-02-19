@@ -3,7 +3,7 @@
 **Schedule HTTP webhooks with cron expressions. No SDK, no queue, no complexity.**
 
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?style=flat&logo=go)](https://go.dev)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 EasyCron is a self-hosted cron-as-a-service. POST a job with a cron expression and a webhook URL — EasyCron fires HTTP callbacks on schedule with HMAC-signed payloads, automatic retries, and Prometheus metrics.
 
@@ -185,4 +185,4 @@ Validate with the HA test harness: `./scripts/ha_test.sh`
 
 ## License
 
-[MIT](LICENSE)
+[Apache 2.0](LICENSE)
