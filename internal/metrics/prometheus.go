@@ -32,9 +32,14 @@ type PrometheusSink struct {
 	bufferSaturation prometheus.Gauge
 	emitErrorsTotal  prometheus.Counter
 
-	// Observability metrics (C4)
+	// Reconciler metrics
 	orphanedExecutions prometheus.Gauge
 	executionLatency   prometheus.Histogram
+
+	// Leader election metrics
+	leaderIsLeader        prometheus.Gauge
+	leaderAcquisitions    prometheus.Counter
+	leaderLosses          *prometheus.CounterVec
 }
 
 // NewPrometheusSink creates a new Prometheus metrics sink.
@@ -45,6 +50,7 @@ func NewPrometheusSink(reg prometheus.Registerer) *PrometheusSink {
 	s.initSchedulerMetrics(reg)
 	s.initDispatcherMetrics(reg)
 	s.initEventBusMetrics(reg)
+	s.initLeaderMetrics(reg)
 	return s
 }
 
@@ -136,7 +142,6 @@ func (s *PrometheusSink) initEventBusMetrics(reg prometheus.Registerer) {
 	s.register(reg, s.bufferSaturation, "easycron_eventbus_buffer_saturation")
 	s.register(reg, s.emitErrorsTotal, "easycron_eventbus_emit_errors_total")
 
-	// Observability metrics (C4)
 	s.orphanedExecutions = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "easycron_orphaned_executions",
 		Help: "Current count of orphaned executions (status=emitted older than threshold).",
@@ -158,8 +163,6 @@ func (s *PrometheusSink) register(reg prometheus.Registerer, c prometheus.Collec
 	}
 }
 
-// Scheduler metrics implementation
-
 func (s *PrometheusSink) TickStarted() {
 	s.ticksTotal.Inc()
 }
@@ -173,15 +176,12 @@ func (s *PrometheusSink) TickCompleted(duration time.Duration, jobsTriggered int
 }
 
 func (s *PrometheusSink) TickDrift(drift time.Duration) {
-	// Record absolute drift value
 	d := drift.Seconds()
 	if d < 0 {
 		d = -d
 	}
 	s.tickDrift.Observe(d)
 }
-
-// Dispatcher metrics implementation
 
 func (s *PrometheusSink) DeliveryAttemptCompleted(attempt int, statusClass string, duration time.Duration) {
 	s.deliveryAttemptsTotal.WithLabelValues(strconv.Itoa(attempt), statusClass).Inc()
@@ -208,8 +208,6 @@ func (s *PrometheusSink) EventsInFlightDecr() {
 	s.eventsInFlight.Dec()
 }
 
-// EventBus metrics implementation
-
 func (s *PrometheusSink) BufferSizeUpdate(size int) {
 	s.bufferSize.Set(float64(size))
 }
@@ -226,12 +224,45 @@ func (s *PrometheusSink) EmitError() {
 	s.emitErrorsTotal.Inc()
 }
 
-// Observability metrics implementation (C4)
-
 func (s *PrometheusSink) OrphanedExecutionsUpdate(count int) {
 	s.orphanedExecutions.Set(float64(count))
 }
 
 func (s *PrometheusSink) ExecutionLatencyObserve(latencySeconds float64) {
 	s.executionLatency.Observe(latencySeconds)
+}
+
+func (s *PrometheusSink) initLeaderMetrics(reg prometheus.Registerer) {
+	s.leaderIsLeader = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "easycron_leader_is_leader",
+		Help: "Whether this instance is currently the leader (1=leader, 0=follower).",
+	})
+	s.leaderAcquisitions = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "easycron_leader_acquisitions_total",
+		Help: "Total number of times this instance acquired leadership.",
+	})
+	s.leaderLosses = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "easycron_leader_losses_total",
+		Help: "Total number of times this instance lost leadership.",
+	}, []string{"reason"})
+
+	s.register(reg, s.leaderIsLeader, "easycron_leader_is_leader")
+	s.register(reg, s.leaderAcquisitions, "easycron_leader_acquisitions_total")
+	s.register(reg, s.leaderLosses, "easycron_leader_losses_total")
+}
+
+func (s *PrometheusSink) LeaderStatusChanged(isLeader bool) {
+	if isLeader {
+		s.leaderIsLeader.Set(1)
+	} else {
+		s.leaderIsLeader.Set(0)
+	}
+}
+
+func (s *PrometheusSink) LeaderAcquired() {
+	s.leaderAcquisitions.Inc()
+}
+
+func (s *PrometheusSink) LeaderLost(reason string) {
+	s.leaderLosses.WithLabelValues(reason).Inc()
 }
