@@ -241,6 +241,8 @@ func runServe() int {
 		return exitInvalidConfig
 	}
 
+	logConfigWarnings(&cfg)
+
 	db, err := sql.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
@@ -523,4 +525,29 @@ func runConfig() int {
 func runVersion() int {
 	fmt.Printf("easycron version %s (commit: %s)\n", version, commit)
 	return exitSuccess
+}
+
+// logConfigWarnings emits startup warnings for dangerous or suboptimal
+// configuration combinations. It runs after config validation passes and
+// before any connections are opened.
+func logConfigWarnings(cfg *config.Config) {
+	if cfg.DispatchMode == "channel" && !cfg.ReconcileEnabled {
+		log.Printf("WARNING [P0]: DISPATCH_MODE=channel with RECONCILE_ENABLED=false — orphaned executions from buffer overflow will be PERMANENTLY LOST. Set RECONCILE_ENABLED=true for production.")
+	}
+
+	if !cfg.ReconcileEnabled {
+		log.Printf("WARNING [P0]: RECONCILE_ENABLED=false — no automatic orphan recovery. Crashed or timed-out executions will remain stuck. Set RECONCILE_ENABLED=true for production.")
+	}
+
+	if !cfg.MetricsEnabled {
+		log.Printf("WARNING [P1]: METRICS_ENABLED=false — Prometheus metrics unavailable. You will have NO visibility into buffer saturation, orphans, or delivery outcomes.")
+	}
+
+	if cfg.DispatchMode == "channel" {
+		log.Printf("INFO: DISPATCH_MODE=channel — single-instance only. DO NOT run multiple instances in this mode (causes duplicate webhooks with no coordination).")
+	}
+
+	if cfg.DispatchMode == "db" && cfg.DispatcherWorkers == 1 {
+		log.Printf("INFO: DISPATCH_MODE=db with DISPATCHER_WORKERS=1 — consider increasing to 2-4 for production workloads.")
+	}
 }
