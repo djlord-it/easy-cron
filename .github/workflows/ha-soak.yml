@@ -1,0 +1,72 @@
+name: HA Soak Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Soak duration (e.g. 5m, 20m, 60m)"
+        required: false
+        default: "20m"
+      spike_threshold:
+        description: "Max deliveries/min before flagging double-scheduling"
+        required: false
+        default: "3"
+  schedule:
+    # Weekly: Sunday 03:00 UTC. A 20-min soak weekly is sufficient to
+    # catch regressions without burning CI minutes nightly.
+    - cron: "0 3 * * 0"
+
+jobs:
+  ha-soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+
+      - name: Ensure scripts are executable
+        run: chmod +x scripts/ha_soak.sh
+
+      - name: Run HA soak test
+        env:
+          HA_DURATION: ${{ inputs.duration || '20m' }}
+          HA_SPIKE_THRESHOLD: ${{ inputs.spike_threshold || '3' }}
+        run: ./scripts/ha_soak.sh
+
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          mkdir -p ha_artifacts
+
+          docker compose -f docker-compose.ha-test.yml -p easycron-ha-test ps \
+            > ha_artifacts/compose_ps.txt 2>&1 || true
+
+          docker compose -f docker-compose.ha-test.yml -p easycron-ha-test logs --no-color \
+            > ha_artifacts/compose.log 2>&1 || true
+
+          for svc in easycron_1 easycron_2 easycron_3 postgres webhook-receiver; do
+            docker compose -f docker-compose.ha-test.yml -p easycron-ha-test logs --no-color "$svc" \
+              > "ha_artifacts/${svc}.log" 2>&1 || true
+          done
+
+          curl -sf http://localhost:9090/stats \
+            > ha_artifacts/receiver_stats.json 2>/dev/null || true
+
+      - name: Upload artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha-soak-artifacts
+          path: ha_artifacts/
+          retention-days: 14
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f docker-compose.ha-test.yml -p easycron-ha-test down -v --remove-orphans 2>/dev/null || true
