@@ -8,160 +8,69 @@ import (
 )
 
 // Config holds all configuration for the easycron application.
-// All values are loaded from environment variables.
+// Values are loaded from environment variables; see printUsage() for the full list.
 type Config struct {
-	// DatabaseURL is the PostgreSQL connection string.
-	// Required. Environment variable: DATABASE_URL
 	DatabaseURL string `json:"database_url"`
+	RedisAddr   string `json:"redis_addr,omitempty"`
+	HTTPAddr    string `json:"http_addr"`
 
-	// RedisAddr is the Redis server address for analytics.
-	// Optional. If empty, analytics is disabled.
-	// Environment variable: REDIS_ADDR
-	RedisAddr string `json:"redis_addr,omitempty"`
+	TickInterval    time.Duration `json:"-"`
+	TickIntervalStr string        `json:"tick_interval"`
 
-	// HTTPAddr is the address for the HTTP server to listen on.
-	// Default: ":8080"
-	// Environment variable: HTTP_ADDR
-	HTTPAddr string `json:"http_addr"`
+	DBOpTimeout    time.Duration `json:"-"`
+	DBOpTimeoutStr string        `json:"db_op_timeout"`
 
-	// TickInterval is the interval between scheduler ticks.
-	// Default: 30s
-	// Environment variable: TICK_INTERVAL
-	TickInterval time.Duration `json:"-"`
+	DBMaxOpenConns       int           `json:"db_max_open_conns"`
+	DBMaxIdleConns       int           `json:"db_max_idle_conns"`
+	DBConnMaxLifetime    time.Duration `json:"-"`
+	DBConnMaxLifetimeStr string        `json:"db_conn_max_lifetime"`
+	DBConnMaxIdleTime    time.Duration `json:"-"`
+	DBConnMaxIdleTimeStr string        `json:"db_conn_max_idle_time"`
 
-	// TickIntervalStr is the string representation for JSON output.
-	TickIntervalStr string `json:"tick_interval"`
+	HTTPShutdownTimeout       time.Duration `json:"-"`
+	HTTPShutdownTimeoutStr    string        `json:"http_shutdown_timeout"`
+	DispatcherDrainTimeout    time.Duration `json:"-"`
+	DispatcherDrainTimeoutStr string        `json:"dispatcher_drain_timeout"`
 
-	// DBOpTimeout is the timeout for individual database operations.
-	// Default: 5s
-	// Environment variable: DB_OP_TIMEOUT
-	DBOpTimeout time.Duration `json:"-"`
+	MetricsEnabled bool   `json:"metrics_enabled"`
+	MetricsPath    string `json:"metrics_path"`
 
-	// DBOpTimeoutStr is the string representation for JSON output.
-	DBOpTimeoutStr string `json:"db_op_timeout"`
+	ReconcileEnabled     bool          `json:"reconcile_enabled"`
+	ReconcileInterval    time.Duration `json:"-"`
+	ReconcileIntervalStr string        `json:"reconcile_interval"`
 
-	// DBMaxOpenConns is the maximum number of open connections to the database.
-	// Default: 25
-	// Environment variable: DB_MAX_OPEN_CONNS
-	DBMaxOpenConns int `json:"db_max_open_conns"`
+	// ReconcileThreshold must exceed the dispatcher's maximum retry window (currently 12m30s).
+	ReconcileThreshold    time.Duration `json:"-"`
+	ReconcileThresholdStr string        `json:"reconcile_threshold"`
 
-	// DBMaxIdleConns is the maximum number of idle connections in the pool.
-	// Default: 5
-	// Environment variable: DB_MAX_IDLE_CONNS
-	DBMaxIdleConns int `json:"db_max_idle_conns"`
-
-	// DBConnMaxLifetime is the maximum lifetime of a connection.
-	// Default: 30m
-	// Environment variable: DB_CONN_MAX_LIFETIME
-	DBConnMaxLifetime time.Duration `json:"-"`
-
-	// DBConnMaxLifetimeStr is the string representation for JSON output.
-	DBConnMaxLifetimeStr string `json:"db_conn_max_lifetime"`
-
-	// DBConnMaxIdleTime is the maximum idle time of a connection.
-	// Default: 5m
-	// Environment variable: DB_CONN_MAX_IDLE_TIME
-	DBConnMaxIdleTime time.Duration `json:"-"`
-
-	// DBConnMaxIdleTimeStr is the string representation for JSON output.
-	DBConnMaxIdleTimeStr string `json:"db_conn_max_idle_time"`
-
-	// HTTPShutdownTimeout is the timeout for graceful HTTP server shutdown.
-	// Default: 10s
-	// Environment variable: HTTP_SHUTDOWN_TIMEOUT
-	HTTPShutdownTimeout time.Duration `json:"-"`
-
-	// HTTPShutdownTimeoutStr is the string representation for JSON output.
-	HTTPShutdownTimeoutStr string `json:"http_shutdown_timeout"`
-
-	// DispatcherDrainTimeout is the timeout for dispatcher to drain events on shutdown.
-	// Default: 30s
-	// Environment variable: DISPATCHER_DRAIN_TIMEOUT
-	DispatcherDrainTimeout time.Duration `json:"-"`
-
-	// DispatcherDrainTimeoutStr is the string representation for JSON output.
-	DispatcherDrainTimeoutStr string `json:"dispatcher_drain_timeout"`
-
-	// MetricsEnabled enables Prometheus metrics.
-	// Default: false
-	// Environment variable: METRICS_ENABLED
-	MetricsEnabled bool `json:"metrics_enabled"`
-
-	// MetricsPath is the HTTP path for the metrics endpoint.
-	// Default: "/metrics"
-	// Environment variable: METRICS_PATH
-	MetricsPath string `json:"metrics_path"`
-
-	// ReconcileEnabled enables the orphan execution reconciler.
-	// Default: false
-	// Environment variable: RECONCILE_ENABLED
-	ReconcileEnabled bool `json:"reconcile_enabled"`
-
-	// ReconcileInterval is how often the reconciler scans for orphans.
-	// Default: 5m
-	// Environment variable: RECONCILE_INTERVAL
-	ReconcileInterval time.Duration `json:"-"`
-
-	// ReconcileIntervalStr is the string representation for JSON output.
-	ReconcileIntervalStr string `json:"reconcile_interval"`
-
-	// ReconcileThreshold is the age after which an emitted execution is orphaned.
-	// Must exceed the dispatcher's maximum retry window (currently 12m30s).
-	// Default: 15m
-	// Environment variable: RECONCILE_THRESHOLD
-	ReconcileThreshold time.Duration `json:"-"`
-
-	// ReconcileThresholdStr is the string representation for JSON output.
-	ReconcileThresholdStr string `json:"reconcile_threshold"`
-
-	// ReconcileBatchSize is the max orphans processed per cycle.
-	// Default: 100
-	// Environment variable: RECONCILE_BATCH_SIZE
 	ReconcileBatchSize int `json:"reconcile_batch_size"`
-
-	// EventBusBufferSize is the capacity of the in-memory event channel
-	// between the scheduler and dispatcher.
-	// Default: 100
-	// Environment variable: EVENTBUS_BUFFER_SIZE
 	EventBusBufferSize int `json:"eventbus_buffer_size"`
 
-	// CircuitBreakerThreshold is the number of consecutive execution failures
-	// before the circuit opens for a webhook URL.
-	// 0 disables the circuit breaker.
-	// Default: 5
-	// Environment variable: CIRCUIT_BREAKER_THRESHOLD
-	CircuitBreakerThreshold int `json:"circuit_breaker_threshold"`
+	// CircuitBreakerThreshold: 0 disables the circuit breaker.
+	CircuitBreakerThreshold  int           `json:"circuit_breaker_threshold"`
+	CircuitBreakerCooldown   time.Duration `json:"-"`
+	CircuitBreakerCooldownStr string       `json:"circuit_breaker_cooldown"`
 
-	// CircuitBreakerCooldown is how long to wait before allowing a probe
-	// attempt to a URL with an open circuit.
-	// Default: 2m
-	// Environment variable: CIRCUIT_BREAKER_COOLDOWN
-	CircuitBreakerCooldown time.Duration `json:"-"`
-
-	// CircuitBreakerCooldownStr is the string representation for JSON output.
-	CircuitBreakerCooldownStr string `json:"circuit_breaker_cooldown"`
-
-	// DispatchMode controls how the dispatcher receives events.
-	// "channel" = in-memory channel (default), "db" = Postgres FOR UPDATE SKIP LOCKED polling.
-	// Environment variable: DISPATCH_MODE
-	DispatchMode string `json:"dispatch_mode"`
-
-	// DBPollInterval is the sleep duration between DB polls when no work is found.
-	// Only used when DISPATCH_MODE=db.
-	// Default: 500ms
-	// Environment variable: DB_POLL_INTERVAL
+	// DispatchMode: "channel" (in-memory) or "db" (Postgres FOR UPDATE SKIP LOCKED polling).
+	DispatchMode      string        `json:"dispatch_mode"`
 	DBPollInterval    time.Duration `json:"-"`
 	DBPollIntervalStr string        `json:"db_poll_interval"`
+	DispatcherWorkers int           `json:"dispatcher_workers"`
 
-	// DispatcherWorkers is the number of concurrent DB-poll worker goroutines.
-	// Only used when DISPATCH_MODE=db.
-	// Default: 1
-	// Environment variable: DISPATCHER_WORKERS
-	DispatcherWorkers int `json:"dispatcher_workers"`
+	// LeaderLockKey: all instances sharing the same database must use the same key.
+	LeaderLockKey int64 `json:"leader_lock_key"`
+
+	// LeaderRetryInterval determines the maximum failover gap.
+	LeaderRetryInterval    time.Duration `json:"-"`
+	LeaderRetryIntervalStr string        `json:"leader_retry_interval"`
+
+	// LeaderHeartbeatInterval: pings the dedicated connection to detect local
+	// connection death. Does NOT renew the advisory lock.
+	LeaderHeartbeatInterval    time.Duration `json:"-"`
+	LeaderHeartbeatIntervalStr string        `json:"leader_heartbeat_interval"`
 }
 
-// Load reads configuration from environment variables.
-// It applies defaults for optional values.
+// Load reads configuration from environment variables with defaults.
 func Load() Config {
 	cfg := Config{
 		DatabaseURL:               os.Getenv("DATABASE_URL"),
@@ -180,7 +89,6 @@ func Load() Config {
 		ReconcileThresholdStr:     os.Getenv("RECONCILE_THRESHOLD"),
 	}
 
-	// Parse batch size (default 100)
 	if batchStr := os.Getenv("RECONCILE_BATCH_SIZE"); batchStr != "" {
 		if batch, err := parseInt(batchStr); err == nil && batch > 0 {
 			cfg.ReconcileBatchSize = batch
@@ -190,7 +98,6 @@ func Load() Config {
 		cfg.ReconcileBatchSize = 100
 	}
 
-	// Parse event bus buffer size (default 100)
 	if bufStr := os.Getenv("EVENTBUS_BUFFER_SIZE"); bufStr != "" {
 		if n, err := parseInt(bufStr); err == nil && n > 0 {
 			cfg.EventBusBufferSize = n
@@ -202,7 +109,6 @@ func Load() Config {
 		cfg.EventBusBufferSize = 100
 	}
 
-	// Parse circuit breaker threshold (default 5)
 	if cbThreshStr := os.Getenv("CIRCUIT_BREAKER_THRESHOLD"); cbThreshStr != "" {
 		if n, err := parseInt(cbThreshStr); err == nil {
 			cfg.CircuitBreakerThreshold = n
@@ -216,15 +122,26 @@ func Load() Config {
 
 	cfg.CircuitBreakerCooldownStr = os.Getenv("CIRCUIT_BREAKER_COOLDOWN")
 
-	// Parse dispatch mode (default "channel")
 	cfg.DispatchMode = os.Getenv("DISPATCH_MODE")
 	if cfg.DispatchMode == "" {
 		cfg.DispatchMode = "channel"
 	}
 
 	cfg.DBPollIntervalStr = os.Getenv("DB_POLL_INTERVAL")
+	cfg.LeaderRetryIntervalStr = os.Getenv("LEADER_RETRY_INTERVAL")
+	cfg.LeaderHeartbeatIntervalStr = os.Getenv("LEADER_HEARTBEAT_INTERVAL")
 
-	// Parse dispatcher workers (default 1)
+	if lockKeyStr := os.Getenv("LEADER_LOCK_KEY"); lockKeyStr != "" {
+		if n, err := parseInt(lockKeyStr); err == nil && n > 0 {
+			cfg.LeaderLockKey = int64(n)
+		} else {
+			log.Printf("config: invalid LEADER_LOCK_KEY %q (must be a positive integer), using default 728379", lockKeyStr)
+		}
+	}
+	if cfg.LeaderLockKey == 0 {
+		cfg.LeaderLockKey = 728379
+	}
+
 	if workersStr := os.Getenv("DISPATCHER_WORKERS"); workersStr != "" {
 		if n, err := parseInt(workersStr); err == nil && n > 0 {
 			cfg.DispatcherWorkers = n
@@ -236,7 +153,6 @@ func Load() Config {
 		cfg.DispatcherWorkers = 1
 	}
 
-	// Parse DB pool sizes
 	if maxOpenStr := os.Getenv("DB_MAX_OPEN_CONNS"); maxOpenStr != "" {
 		if n, err := parseInt(maxOpenStr); err == nil && n > 0 {
 			cfg.DBMaxOpenConns = n
@@ -255,8 +171,7 @@ func Load() Config {
 		cfg.DBMaxIdleConns = 5
 	}
 
-	// Apply defaults
-	// Support Railway's PORT variable as fallback for HTTP_ADDR
+	// Support Railway's PORT variable as fallback for HTTP_ADDR.
 	if cfg.HTTPAddr == "" {
 		if port := os.Getenv("PORT"); port != "" {
 			cfg.HTTPAddr = ":" + port
@@ -297,8 +212,14 @@ func Load() Config {
 	if cfg.DBPollIntervalStr == "" {
 		cfg.DBPollIntervalStr = "500ms"
 	}
+	if cfg.LeaderRetryIntervalStr == "" {
+		cfg.LeaderRetryIntervalStr = "5s"
+	}
+	if cfg.LeaderHeartbeatIntervalStr == "" {
+		cfg.LeaderHeartbeatIntervalStr = "2s"
+	}
 
-	// Parse durations (validation happens separately)
+	// Parse durations; validation is handled separately by Validate().
 	if d, err := time.ParseDuration(cfg.TickIntervalStr); err == nil {
 		cfg.TickInterval = d
 	}
@@ -328,6 +249,12 @@ func Load() Config {
 	}
 	if d, err := time.ParseDuration(cfg.DBPollIntervalStr); err == nil {
 		cfg.DBPollInterval = d
+	}
+	if d, err := time.ParseDuration(cfg.LeaderRetryIntervalStr); err == nil {
+		cfg.LeaderRetryInterval = d
+	}
+	if d, err := time.ParseDuration(cfg.LeaderHeartbeatIntervalStr); err == nil {
+		cfg.LeaderHeartbeatInterval = d
 	}
 
 	return cfg
@@ -368,9 +295,12 @@ func (c Config) MaskedJSON() ([]byte, error) {
 		EventBusBufferSize      int    `json:"eventbus_buffer_size"`
 		CircuitBreakerThreshold int    `json:"circuit_breaker_threshold"`
 		CircuitBreakerCooldown  string `json:"circuit_breaker_cooldown"`
-		DispatchMode            string `json:"dispatch_mode"`
-		DBPollInterval          string `json:"db_poll_interval"`
-		DispatcherWorkers       int    `json:"dispatcher_workers"`
+		DispatchMode             string `json:"dispatch_mode"`
+		DBPollInterval           string `json:"db_poll_interval"`
+		DispatcherWorkers        int    `json:"dispatcher_workers"`
+		LeaderLockKey            int64  `json:"leader_lock_key"`
+		LeaderRetryInterval      string `json:"leader_retry_interval"`
+		LeaderHeartbeatInterval  string `json:"leader_heartbeat_interval"`
 	}{
 		DatabaseURL:            maskSecret(c.DatabaseURL),
 		RedisAddr:              c.RedisAddr,
@@ -395,17 +325,18 @@ func (c Config) MaskedJSON() ([]byte, error) {
 		DispatchMode:            c.DispatchMode,
 		DBPollInterval:          c.DBPollIntervalStr,
 		DispatcherWorkers:       c.DispatcherWorkers,
+		LeaderLockKey:           c.LeaderLockKey,
+		LeaderRetryInterval:     c.LeaderRetryIntervalStr,
+		LeaderHeartbeatInterval: c.LeaderHeartbeatIntervalStr,
 	}
 	return json.MarshalIndent(masked, "", "  ")
 }
 
-// maskSecret masks a secret value, preserving only the scheme if present.
+// maskSecret masks a secret value, preserving only the URI scheme if present.
 func maskSecret(s string) string {
 	if s == "" {
 		return ""
 	}
-	// For connection strings like postgres://user:pass@host/db,
-	// show postgres://*** to indicate format without exposing credentials.
 	for _, scheme := range []string{"postgres://", "postgresql://"} {
 		if len(s) >= len(scheme) && s[:len(scheme)] == scheme {
 			return scheme + "***"

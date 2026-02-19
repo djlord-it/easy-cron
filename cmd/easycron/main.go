@@ -24,6 +24,7 @@ import (
 	"github.com/djlord-it/easy-cron/internal/cron"
 	"github.com/djlord-it/easy-cron/internal/dispatcher"
 	"github.com/djlord-it/easy-cron/internal/domain"
+	"github.com/djlord-it/easy-cron/internal/leaderelection"
 	"github.com/djlord-it/easy-cron/internal/metrics"
 	"github.com/djlord-it/easy-cron/internal/reconciler"
 	"github.com/djlord-it/easy-cron/internal/scheduler"
@@ -33,7 +34,6 @@ import (
 	_ "github.com/lib/pq"
 )
 
-// cronParserAdapter adapts internal/cron.Parser to scheduler.CronParser interface.
 type cronParserAdapter struct {
 	parser *cron.Parser
 }
@@ -46,7 +46,6 @@ func (a *cronParserAdapter) Parse(expression string, timezone string) (scheduler
 	return &cronScheduleAdapter{sched: sched}, nil
 }
 
-// cronScheduleAdapter adapts internal/cron.Schedule to scheduler.CronSchedule interface.
 type cronScheduleAdapter struct {
 	sched cron.Schedule
 }
@@ -130,6 +129,10 @@ Environment Variables:
   DB_POLL_INTERVAL          DB poll sleep interval (default: "500ms", db mode only)
   DISPATCHER_WORKERS        Concurrent dispatch workers (default: "1", db mode only)
 
+  LEADER_LOCK_KEY           Advisory lock key for leader election (default: "728379", db mode only)
+  LEADER_RETRY_INTERVAL     Follower lock acquisition retry interval (default: "5s", db mode only)
+  LEADER_HEARTBEAT_INTERVAL Leader connection health check interval (default: "2s", db mode only)
+
   METRICS_ENABLED           Enable Prometheus metrics (default: "false")
   METRICS_PATH              Metrics endpoint path (default: "/metrics")
 
@@ -137,6 +140,97 @@ Environment Variables:
   RECONCILE_INTERVAL        How often to scan for orphans (default: "5m")
   RECONCILE_THRESHOLD       Age before execution is orphaned (default: "10m")
   RECONCILE_BATCH_SIZE      Max orphans per cycle (default: "100")`)
+}
+
+// leaderRuntime manages the lifecycle of leader-only components (scheduler, reconciler).
+// All methods are safe for concurrent use. stop() is idempotent.
+type leaderRuntime struct {
+	mu      sync.Mutex
+	running bool
+
+	cancelScheduler  context.CancelFunc
+	cancelReconciler context.CancelFunc
+	wg               sync.WaitGroup
+
+	sched       *scheduler.Scheduler
+	recon       *reconciler.Reconciler
+	metricsSink *metrics.PrometheusSink
+	cfg         config.Config
+	store       *postgres.Store
+	emitter     interface {
+		Emit(ctx context.Context, event domain.TriggerEvent) error
+	}
+}
+
+func (lr *leaderRuntime) start(leaderCtx context.Context) {
+	lr.mu.Lock()
+	defer lr.mu.Unlock()
+
+	if lr.running {
+		return
+	}
+
+	schedCtx, cancelSched := context.WithCancel(leaderCtx)
+	lr.cancelScheduler = cancelSched
+
+	lr.wg.Add(1)
+	go func() {
+		defer lr.wg.Done()
+		lr.sched.Run(schedCtx)
+	}()
+
+	if lr.cfg.ReconcileEnabled {
+		reconCtx, cancelRecon := context.WithCancel(leaderCtx)
+		lr.cancelReconciler = cancelRecon
+
+		recon := reconciler.New(
+			reconciler.Config{
+				Interval:  lr.cfg.ReconcileInterval,
+				Threshold: lr.cfg.ReconcileThreshold,
+				BatchSize: lr.cfg.ReconcileBatchSize,
+			},
+			lr.store,
+			lr.emitter,
+		)
+		if lr.metricsSink != nil {
+			recon = recon.WithMetrics(lr.metricsSink)
+		}
+		lr.recon = recon
+
+		lr.wg.Add(1)
+		go func() {
+			defer lr.wg.Done()
+			recon.Run(reconCtx)
+		}()
+		log.Printf("easycron: reconciler started (interval=%s, threshold=%s, batch=%d)",
+			lr.cfg.ReconcileInterval, lr.cfg.ReconcileThreshold, lr.cfg.ReconcileBatchSize)
+	}
+
+	lr.running = true
+	log.Println("easycron: leader duties started (scheduler + reconciler)")
+}
+
+func (lr *leaderRuntime) stop() {
+	lr.mu.Lock()
+
+	if !lr.running {
+		lr.mu.Unlock()
+		return
+	}
+
+	if lr.cancelScheduler != nil {
+		lr.cancelScheduler()
+	}
+	if lr.cancelReconciler != nil {
+		lr.cancelReconciler()
+	}
+
+	lr.running = false
+	lr.mu.Unlock()
+
+	// Wait outside the lock so Run goroutines can return without deadlock.
+	lr.wg.Wait()
+	log.Println("easycron: leader duties stopped (scheduler + reconciler)")
 }
 
 func runServe() int {
@@ -147,7 +241,6 @@ func runServe() int {
 		return exitInvalidConfig
 	}
 
-	// Connect to PostgreSQL
 	db, err := sql.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
@@ -155,7 +248,6 @@ func runServe() int {
 	}
 	defer db.Close()
 
-	// Configure connection pool
 	db.SetMaxOpenConns(cfg.DBMaxOpenConns)
 	db.SetMaxIdleConns(cfg.DBMaxIdleConns)
 	db.SetConnMaxLifetime(cfg.DBConnMaxLifetime)
@@ -173,7 +265,6 @@ func runServe() int {
 	cronParser := &cronParserAdapter{parser: cron.NewParser()}
 	webhookSender := dispatcher.NewHTTPWebhookSender()
 
-	// Initialize metrics sink (optional)
 	var metricsSink *metrics.PrometheusSink
 
 	if cfg.MetricsEnabled {
@@ -183,21 +274,18 @@ func runServe() int {
 		log.Println("easycron: METRICS_ENABLED not set; metrics disabled")
 	}
 
-	// Dispatch mode determines how events flow from scheduler to dispatcher.
-	// Both scheduler.EventEmitter and reconciler.EventEmitter have the same
-	// Emit method; NopEmitter and EventBus implement both.
+	// Dispatch mode: "channel" uses an in-memory EventBus, "db" uses NopEmitter
+	// because workers poll Postgres directly.
 	var emitter interface {
 		Emit(ctx context.Context, event domain.TriggerEvent) error
 	}
 	var dispatchCh <-chan domain.TriggerEvent
 
 	if cfg.DispatchMode == "db" {
-		// DB mode: scheduler writes rows, workers poll Postgres directly
 		emitter = channel.NopEmitter{}
 		log.Printf("easycron: dispatch mode=db (workers=%d, poll_interval=%s)",
 			cfg.DispatcherWorkers, cfg.DBPollInterval)
 	} else {
-		// Channel mode: in-memory event bus (default)
 		var busOpts []channel.Option
 		if metricsSink != nil {
 			busOpts = append(busOpts, channel.WithMetrics(metricsSink))
@@ -224,7 +312,6 @@ func runServe() int {
 		disp = disp.WithMetrics(metricsSink)
 	}
 
-	// Wire analytics if Redis is configured
 	if cfg.RedisAddr != "" {
 		redisClient := redis.NewClient(&redis.Options{
 			Addr: cfg.RedisAddr,
@@ -245,19 +332,17 @@ func runServe() int {
 		log.Println("easycron: circuit breaker disabled (threshold=0)")
 	}
 
-	// Create API handler with the same store instance
-	// Using a fixed project ID for single-tenant mode
+	// Fixed project ID for single-tenant mode.
 	projectID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	apiHandler := api.NewHandler(store, projectID).WithHealthChecker(db)
 
-	// Create HTTP mux combining API and optional metrics
 	httpMux := http.NewServeMux()
 	if cfg.MetricsEnabled {
 		httpMux.Handle(cfg.MetricsPath, promhttp.Handler())
 	}
 	httpMux.Handle("/", apiHandler)
 
-	// Start HTTP server
+	// HTTP server runs on all instances regardless of dispatch mode.
 	httpServer := &http.Server{
 		Addr:    cfg.HTTPAddr,
 		Handler: httpMux,
@@ -270,20 +355,9 @@ func runServe() int {
 		}
 	}()
 
-	// Use separate contexts for scheduler, dispatcher, and reconciler to enable ordered shutdown.
-	schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
+	// Dispatcher runs on all instances regardless of dispatch mode.
 	dispatcherCtx, cancelDispatcher := context.WithCancel(context.Background())
-
-	var schedulerWg sync.WaitGroup
 	var dispatcherWg sync.WaitGroup
-	var reconcilerWg sync.WaitGroup
-	var cancelReconciler context.CancelFunc
-
-	schedulerWg.Add(1)
-	go func() {
-		defer schedulerWg.Done()
-		sched.Run(schedulerCtx)
-	}()
 
 	dispatcherWg.Add(1)
 	go func() {
@@ -295,34 +369,103 @@ func runServe() int {
 		}
 	}()
 
-	// Start reconciler if enabled
-	if cfg.ReconcileEnabled {
-		var reconcilerCtx context.Context
-		reconcilerCtx, cancelReconciler = context.WithCancel(context.Background())
-		recon := reconciler.New(
-			reconciler.Config{
-				Interval:  cfg.ReconcileInterval,
-				Threshold: cfg.ReconcileThreshold,
-				BatchSize: cfg.ReconcileBatchSize,
-			},
-			store,
-			emitter,
+	// shutdown stops scheduler+reconciler (or leader election, which stops them indirectly).
+	var shutdown func()
+
+	if cfg.DispatchMode == "db" {
+		// Scheduler and reconciler run only on the leader instance.
+		appCtx, cancelApp := context.WithCancel(context.Background())
+
+		lr := &leaderRuntime{
+			sched:       sched,
+			metricsSink: metricsSink,
+			cfg:         cfg,
+			store:       store,
+			emitter:     emitter,
+		}
+
+		elector := leaderelection.New(
+			db, cfg.LeaderLockKey,
+			cfg.LeaderRetryInterval, cfg.LeaderHeartbeatInterval,
+			func(leaderCtx context.Context) { lr.start(leaderCtx) },
+			func() { lr.stop() },
 		)
 		if metricsSink != nil {
-			recon = recon.WithMetrics(metricsSink)
+			elector = elector.WithMetrics(metricsSink)
 		}
-		reconcilerWg.Add(1)
+
+		var electorWg sync.WaitGroup
+		electorWg.Add(1)
 		go func() {
-			defer reconcilerWg.Done()
-			recon.Run(reconcilerCtx)
+			defer electorWg.Done()
+			elector.Run(appCtx)
 		}()
-		log.Printf("easycron: reconciler enabled (interval=%s, threshold=%s, batch=%d)",
-			cfg.ReconcileInterval, cfg.ReconcileThreshold, cfg.ReconcileBatchSize)
+
+		shutdown = func() {
+			log.Println("easycron: stopping leader election...")
+			cancelApp()
+			electorWg.Wait()
+			log.Println("easycron: leader election stopped")
+		}
+
+		log.Printf("easycron: leader election enabled (lock_key=%d, retry=%s, heartbeat=%s)",
+			cfg.LeaderLockKey, cfg.LeaderRetryInterval, cfg.LeaderHeartbeatInterval)
 	} else {
-		log.Println("easycron: RECONCILE_ENABLED not set; reconciler disabled")
+		// Channel mode: no leader election needed.
+		schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
+		var schedulerWg sync.WaitGroup
+
+		schedulerWg.Add(1)
+		go func() {
+			defer schedulerWg.Done()
+			sched.Run(schedulerCtx)
+		}()
+
+		var reconcilerWg sync.WaitGroup
+		var cancelReconciler context.CancelFunc
+
+		if cfg.ReconcileEnabled {
+			var reconcilerCtx context.Context
+			reconcilerCtx, cancelReconciler = context.WithCancel(context.Background())
+			recon := reconciler.New(
+				reconciler.Config{
+					Interval:  cfg.ReconcileInterval,
+					Threshold: cfg.ReconcileThreshold,
+					BatchSize: cfg.ReconcileBatchSize,
+				},
+				store,
+				emitter,
+			)
+			if metricsSink != nil {
+				recon = recon.WithMetrics(metricsSink)
+			}
+			reconcilerWg.Add(1)
+			go func() {
+				defer reconcilerWg.Done()
+				recon.Run(reconcilerCtx)
+			}()
+			log.Printf("easycron: reconciler enabled (interval=%s, threshold=%s, batch=%d)",
+				cfg.ReconcileInterval, cfg.ReconcileThreshold, cfg.ReconcileBatchSize)
+		} else {
+			log.Println("easycron: RECONCILE_ENABLED not set; reconciler disabled")
+		}
+
+		shutdown = func() {
+			log.Println("easycron: stopping scheduler...")
+			cancelScheduler()
+			schedulerWg.Wait()
+			log.Println("easycron: scheduler stopped")
+
+			if cancelReconciler != nil {
+				log.Println("easycron: stopping reconciler...")
+				cancelReconciler()
+				reconcilerWg.Wait()
+				log.Println("easycron: reconciler stopped")
+			}
+		}
 	}
 
-	log.Printf("easycron: started (tick=%s, http=%s)", cfg.TickInterval, cfg.HTTPAddr)
+	log.Printf("easycron: started (tick=%s, http=%s, dispatch_mode=%s)", cfg.TickInterval, cfg.HTTPAddr, cfg.DispatchMode)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -330,27 +473,16 @@ func runServe() int {
 
 	log.Printf("easycron: received signal %v, shutting down", received)
 
-	// Phase 1: Stop scheduler (no new events emitted)
-	log.Println("easycron: stopping scheduler...")
-	cancelScheduler()
-	schedulerWg.Wait()
-	log.Println("easycron: scheduler stopped")
+	// Shutdown order: scheduler/reconciler first, then dispatcher (drains buffered
+	// events), then HTTP server. This ensures no new events are emitted while the
+	// dispatcher finishes in-flight work.
+	shutdown()
 
-	// Phase 2: Stop reconciler (no new re-emits)
-	if cancelReconciler != nil {
-		log.Println("easycron: stopping reconciler...")
-		cancelReconciler()
-		reconcilerWg.Wait()
-		log.Println("easycron: reconciler stopped")
-	}
-
-	// Phase 3: Stop dispatcher (will drain buffered events before returning)
 	log.Println("easycron: stopping dispatcher (draining events)...")
 	cancelDispatcher()
 	dispatcherWg.Wait()
 	log.Println("easycron: dispatcher stopped")
 
-	// Phase 4: Stop HTTP server with graceful shutdown
 	log.Println("easycron: stopping http server...")
 	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), cfg.HTTPShutdownTimeout)
 	defer httpShutdownCancel()
